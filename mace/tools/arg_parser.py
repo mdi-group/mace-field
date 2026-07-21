@@ -752,39 +752,69 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         "--polarization_weight",
         help="weight of polarization loss",
         type=float,
+        default=10.0,
+    )
+    parser.add_argument(
+        "--polarization_loss_mode",
+        help=(
+            "polarization loss form: folded Cartesian Huber residuals or the "
+            "normalized geometry-aware metric loss in folded polarization-"
+            "quantum coordinates"
+        ),
+        type=str,
+        choices=["cartesian_huber", "normalized_metric"],
+        default="normalized_metric",
+    )
+    parser.add_argument(
+        "--polarization_loss_scale",
+        help=(
+            "explicit multiplier applied to the reduced polarization loss "
+            "term before polarization_weight"
+        ),
+        type=float,
         default=1.0,
+    )
+    parser.add_argument(
+        "--polarization_huber_delta",
+        help=(
+            "Huber delta for folded polarization in e/A^2 when "
+            "polarization_loss_mode=cartesian_huber; defaults to 5 * "
+            "huber_delta"
+        ),
+        type=float,
+        default=None,
     )
     parser.add_argument(
         "--swa_polarization_weight",
         "--stage_two_polarization_weight",
         help="weight of polarization after starting Stage Two (previously called swa)",
         type=float,
-        default=1.0,
+        default=1000.0,
         dest="swa_polarization_weight",
     )
     parser.add_argument(
-        "--becs_weight", help="weight of becs loss", type=float, default=1.0
+        "--becs_weight", help="weight of becs loss", type=float, default=100.0
     )
     parser.add_argument(
         "--swa_becs_weight",
         "--stage_two_becs_weight",
         help="weight of becs after starting Stage Two (previously called swa)",
         type=float,
-        default=1.0,
+        default=100.0,
         dest="swa_becs_weight",
     )
     parser.add_argument(
         "--polarizability_weight",
         help="weight of polarizability loss",
         type=float,
-        default=1.0,
+        default=10.0,
     )
     parser.add_argument(
         "--swa_polarizability_weight",
         "--stage_two_polarizability_weight",
         help="weight of polarizability after starting Stage Two (previously called swa)",
         type=float,
-        default=1.0,
+        default=1000.0,
         dest="swa_polarizability_weight",
     )
     parser.add_argument(
