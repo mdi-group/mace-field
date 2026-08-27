@@ -43,6 +43,14 @@ pip install ./mace
 
 ---
 
+## Pretrained MACE-Field Foundation model
+
+The [package releases](https://github.com/mdi-group/mace-field/releases/tag/1.0.2) contain a [MACE-Field foundation model](https://github.com/mdi-group/mace-field/releases/download/1.0.2/MACEField-MH-0-omat-dielectric.model). The backbone comes from the [MACE multihead MP-0 foundation model](https://github.com/ACEsuit/mace-foundations/releases/tag/mace_mh_1), which was fine-tuned to be field-aware using MACE-Field with datasets: `MP-Dielectric` (BEC and polarizability labels) and `MP-Ferroelectric` (Berry-polarization branch labels).
+
+This MACE-Field foundation model can be finetuned further using the provided [example bash script](https://github.com/mdi-group/mace-field/releases/download/1.0.2/macefield-example-finetuning-script.sh). We provide a [replay set](https://github.com/mdi-group/mace-field/releases/download/1.0.2/MP-dielectric-ferroelectric-replay-dataset.xyz) for dielectric/ferroelectric finetuning.
+
+---
+
 ## Architecture summary
 
 ![MACE-Field architecture](macefield_architecture.png)
@@ -272,13 +280,19 @@ fix mace_efield all python/invoke 1 end_of_step set_mace_efield
 If you use this code, please cite:
 
 ```bibtex
-@misc{martin2025generallearningelectricresponse,
-  title={General Learning of the Electric Response of Inorganic Materials},
-  author={Martin, Bradley A. A. and Ganose, Alex M. and Kapil, Venkat and Li, Tingwei and Butler, Keith T.},
-  year={2025},
-  eprint={2508.17870},
-  archivePrefix={arXiv},
-  primaryClass={cond-mat.mtrl-sci}
+@article{martin2026macefield,
+  title = {General Learning of the Electric Response of Inorganic Materials},
+  author = {Martin, Bradley A. A. and Ganose, Alex M. and Kapil, Venkat and Li, Tingwei and Butler, Keith T.},
+  journal = {PRX Intelligence},
+  volume = {1},
+  issue = {1},
+  pages = {013006},
+  numpages = {20},
+  year = {2026},
+  month = {Jul},
+  publisher = {American Physical Society},
+  doi = {10.1103/b116-xy8k},
+  url = {https://link.aps.org/doi/10.1103/b116-xy8k}
 }
 ```
 
