@@ -38,7 +38,7 @@ MACE-Field supports:
 
 ```bash
 git clone https://github.com/mdi-group/mace-field.git
-pip install ./mace
+pip install ./mace-field
 ```
 
 ---
