@@ -139,12 +139,14 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "BOTNet",
             "MACE",
             "ScaleShiftMACE",
+            "PolarMACE",
             "MACELES",
             "MACEField",
             "ScaleShiftBOTNet",
             "AtomicDipolesMACE",
             "AtomicDielectricMACE",
             "EnergyDipolesMACE",
+            "MagneticScaleShiftMACE",
         ],
     )
     parser.add_argument(
@@ -211,6 +213,8 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "RealAgnosticDensityInteractionBlock",
             "RealAgnosticDensityResidualInteractionBlock",
             "RealAgnosticResidualNonLinearInteractionBlock",
+            "MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock",
         ],
     )
     parser.add_argument(
@@ -224,6 +228,8 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "RealAgnosticDensityInteractionBlock",
             "RealAgnosticDensityResidualInteractionBlock",
             "RealAgnosticResidualNonLinearInteractionBlock",
+            "MagneticRealAgnosticResidueSpinOrbitCoupledDensityInteractionBlock",
+            "MagneticRealAgnosticSpinOrbitCoupledDensityInteractionBlock",
         ],
     )
     parser.add_argument(
@@ -277,6 +283,12 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
     )
+    parser.add_argument(
+        "--use_edge_irreps_first",
+        help="use edge irreps in the first interaction block",
+        type=str2bool,
+        default=False,
+    )
     # add option to specify irreps by channel number and max L
     parser.add_argument(
         "--num_channels",
@@ -296,6 +308,96 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         type=str,
         default="silu",
         choices=["silu", "tanh", "abs", "None"],
+    )
+    parser.add_argument(
+        "--kspace_cutoff_factor",
+        help="k-space cutoff factor used by PolarMACE",
+        type=float,
+        default=1.5,
+    )
+    parser.add_argument(
+        "--atomic_multipoles_max_l",
+        help="maximum l for atomic multipoles in PolarMACE",
+        type=int,
+        default=0,
+    )
+    parser.add_argument(
+        "--atomic_multipoles_smearing_width",
+        help="Gaussian smearing width for atomic multipoles in PolarMACE",
+        type=float,
+        default=1.0,
+    )
+    parser.add_argument(
+        "--field_feature_max_l",
+        help="maximum l for projected field features in PolarMACE",
+        type=int,
+        default=0,
+    )
+    parser.add_argument(
+        "--field_feature_widths",
+        help="list of field feature widths for PolarMACE",
+        type=str,
+        default="[1.0]",
+    )
+    parser.add_argument(
+        "--field_feature_norms",
+        help="optional list of field feature norms for PolarMACE",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--num_recursion_steps",
+        help="number of fixed-point recursion steps in PolarMACE",
+        type=int,
+        default=1,
+    )
+    parser.add_argument(
+        "--field_si",
+        help="include self-interaction when projecting local fields in PolarMACE",
+        type=str2bool,
+        default=False,
+    )
+    parser.add_argument(
+        "--include_electrostatic_self_interaction",
+        help="include electrostatic self interaction in PolarMACE",
+        type=str2bool,
+        default=False,
+    )
+    parser.add_argument(
+        "--add_local_electron_energy",
+        help="add local electron energy correction in PolarMACE",
+        type=str2bool,
+        default=False,
+    )
+    parser.add_argument(
+        "--quadrupole_feature_corrections",
+        help="enable quadrupole feature corrections in PolarMACE",
+        type=str2bool,
+        default=False,
+    )
+    parser.add_argument(
+        "--return_electrostatic_potentials",
+        help="return electrostatic potentials from PolarMACE forward pass",
+        type=str2bool,
+        default=False,
+    )
+    parser.add_argument(
+        "--field_norm_factor",
+        help="global normalization factor for field features in PolarMACE",
+        type=float,
+        default=0.02,
+    )
+    parser.add_argument(
+        "--fixedpoint_update_config",
+        help="dict-like config for PolarMACE fixed-point update block",
+        type=str,
+        default=None,
+    )
+    parser.add_argument(
+        "--field_readout_config",
+        help="dict-like config for PolarMACE field readout block",
+        type=str,
+        default=None,
     )
     parser.add_argument(
         "--scaling",
@@ -358,6 +460,12 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--compute_atomic_dipole",
         help="Select True to compute dipoles",
+        type=str2bool,
+        default=False,
+    )
+    parser.add_argument(
+        "--compute_magforces",
+        help="Select True to compute magnetic forces",
         type=str2bool,
         default=False,
     )
@@ -465,8 +573,18 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=False,
     )
     parser.add_argument(
+        "--pseudolabel_replay_compute_stress",
+        help="When replay pseudolabels are generated, always generate stress labels even if the original replay data lacked stress",
+        type=str2bool,
+        default=False,
+    )
+    parser.add_argument(
         "--foundation_filter_elements",
-        help="Filter element during fine-tuning",
+        help=(
+            "Deprecated alias of --foundation_model_readout. Despite the name, "
+            "it controls whether foundation readout weights are transferred."
+        ),
+        dest="foundation_model_readout",
         type=str2bool,
         default=True,
         required=False,
@@ -557,6 +675,24 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         type=str2bool,
         default=False,
     )
+    parser.add_argument(
+        "--lora",
+        help="Use Low-Rank Adaptation for the fine-tuning",
+        type=str2bool,
+        default=False,
+    )
+    parser.add_argument(
+        "--lora_rank",
+        help="Rank of the LoRA matrices",
+        type=int,
+        default=4,
+    )
+    parser.add_argument(
+        "--lora_alpha",
+        help="Scaling factor for LoRA",
+        type=float,
+        default=1.0,
+    )
 
     # Keys
     parser.add_argument(
@@ -612,6 +748,18 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         help="Key of polarizability in training xyz",
         type=str,
         default=DefaultKeys.POLARIZABILITY.value,
+    )
+    parser.add_argument(
+        "--magmom_key",
+        help="Key of magnetic moment in training xyz",
+        type=str,
+        default=DefaultKeys.MAGMOM.value,
+    )
+    parser.add_argument(
+        "--magforces_key",
+        help="Key of magnetic forces in training xyz",
+        type=str,
+        default=DefaultKeys.MAGFORCES.value,
     )
     parser.add_argument(
         "--head_key",
@@ -703,6 +851,20 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=100.0,
         dest="swa_forces_weight",
+    )
+    parser.add_argument(
+        "--magforces_weight",
+        help="weight of mag forces loss",
+        type=float,
+        default=100.0,
+    )
+    parser.add_argument(
+        "--swa_magforces_weight",
+        "--stage_two_magforces_weight",
+        help="weight of magforces loss after starting Stage Two (previously called swa)",
+        type=float,
+        default=100.0,
+        dest="swa_magforces_weight",
     )
     parser.add_argument(
         "--energy_weight", help="weight of energy loss", type=float, default=1.0
@@ -842,6 +1004,24 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.9,
     )
+    parser.add_argument(
+        "--beta1_schedulefree",
+        help="Beta1 parameter for the ScheduleFree optimizer",
+        type=float,
+        default=0.9,
+    )
+    parser.add_argument(
+        "--beta2_schedulefree",
+        help="Beta2 parameter for the ScheduleFree optimizer",
+        type=float,
+        default=0.98,
+    )
+    parser.add_argument(
+        "--warmup_steps_schedulefree",
+        help="Number of linear LR warmup steps for the ScheduleFree optimizer",
+        type=int,
+        default=0,
+    )
     parser.add_argument("--batch_size", help="batch size", type=int, default=10)
     parser.add_argument(
         "--valid_batch_size", help="Validation batch size", type=int, default=10
@@ -859,6 +1039,18 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--weight_decay", help="weight decay (L2 penalty)", type=float, default=5e-7
+    )
+    parser.add_argument(
+        "--lr_params_factors",
+        help="Learning rate factors to multiply on the original lr",
+        type=str,
+        default='{"embedding_lr_factor": 1.0, "interactions_lr_factor": 1.0, "products_lr_factor": 1.0, "readouts_lr_factor": 1.0}',
+    )
+    parser.add_argument(
+        "--freeze",
+        help="Freeze layers from 1 to N. Can be positive or negative, e.g. -1 means the last layer is frozen. 0 or None means all layers are active and is a default setting",
+        type=int,
+        default=None,
     )
     parser.add_argument(
         "--amsgrad",
@@ -938,9 +1130,20 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--foundation_model_readout",
-        help="Use readout of foundation model for transfer learning",
-        action="store_false",
+        help=(
+            "Transfer foundation readout weights. Pass without a value to turn "
+            "the transfer off, or provide an explicit boolean."
+        ),
+        nargs="?",
+        const=False,
+        type=str2bool,
         default=True,
+    )
+    parser.add_argument(
+        "--finetune_dipoles_polarizabilities",
+        help="Fine-tune an existing AtomicDielectricMACE (MACE-MDP) model on dipoles and polarizabilities only. Requires --foundation_model pointing to the pretrained MDP checkpoint.",
+        type=str2bool,
+        default=False,
     )
     parser.add_argument(
         "--eval_interval", help="evaluate model every <n> epochs", type=int, default=1
@@ -1051,6 +1254,58 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
             "forces_weight",
         ],
     )
+
+    # --- magnetic mace specific arguments ---
+    parser.add_argument(
+        "--num_mag_radial_basis_one_body",
+        help="number of radial basis for one body contribution in magnetic mace",
+        type=int,
+        default=10,
+    )
+    parser.add_argument(
+        "--m_max",
+        help=(
+            "|m| saturation per element. Either a dict literal mapping atomic "
+            'number to m_max (e.g. "{26: 1.8, 28: 1.2}" — only listed elements '
+            "are required, others default to 1.0), or a space-separated list of "
+            "floats ordered by z_table.zs (legacy)."
+        ),
+        type=str,
+        nargs="+",
+        default=None,
+    )
+    parser.add_argument(
+        "--max_m_ell",
+        help="max_ell for magnetic mace",
+        type=int,
+        default=3,
+    )
+    parser.add_argument(
+        "--num_mag_radial_basis",
+        help="number of radial basis for magnetic part",
+        type=int,
+        default=8,
+    )
+    parser.add_argument(
+        "--use_magmom_one_body",
+        help="If true, use one body mangetic moment contribution in the model",
+        type=str2bool,
+        default=False,
+    )
+    parser.add_argument(
+        "--train_one_body_contribution",
+        help="If true, include the magmom one-body coefficients in the optimizer "
+        "(only relevant when --use_magmom_one_body is set).",
+        type=str2bool,
+        default=True,
+    )
+    parser.add_argument(
+        "--data_aug_magmom",
+        help="Whether to use data augmentation on magnetic moment training. ",
+        type=str2bool,
+        default=False,
+    )
+
     return parser
 
 

@@ -2,12 +2,14 @@ import ast
 import logging
 
 import numpy as np
+import torch
 from e3nn import o3
 
 from mace import modules
 from mace.modules.wrapper_ops import CuEquivarianceConfig
-from mace.tools.finetuning_utils import load_foundations_elements
-from mace.tools.scripts_utils import extract_config_mace_model
+from mace.tools.finetuning_utils import load_foundations_elements, load_foundations_mdp
+from mace.tools.scripts_utils import extract_config_mace_model, resolve_m_max
+from mace.tools.torch_tools import dtype_dict
 from mace.tools.utils import AtomicNumberTable
 
 
@@ -22,18 +24,26 @@ def configure_model(
 ):
     # Selecting outputs
     compute_virials = args.loss == "virials"
-    compute_stress = args.loss in ("stress", "huber", "universal", "universal_field")
-    compute_dielectric = args.loss == "universal_field"
+    compute_stress = args.loss in (
+        "stress",
+        "huber",
+        "universal",
+        "universal_field",
+        "UniversalField",
+    )
 
     if compute_virials:
         args.compute_virials = True
-        args.error_table = "PerAtomRMSEstressvirials"
     elif compute_stress:
         args.compute_stress = True
-        args.error_table = "PerAtomRMSEstressvirials"
 
-    if compute_dielectric:
-        args.error_table = "PerAtomFieldRMSE"
+    if compute_virials or compute_stress:
+        if args.error_table in ["PerAtomRMSE", "PerAtomMAE", "TotalRMSE", "TotalMAE"]:
+            args.error_table = (
+                "PerAtomRMSEstressvirials"
+                if "RMSE" in args.error_table
+                else "PerAtomMAEstressvirials"
+            )
 
     output_args = {
         "energy": args.compute_energy,
@@ -44,6 +54,7 @@ def configure_model(
         "polarization": args.compute_polarization,
         "becs": args.compute_becs,
         "polarizability": args.compute_polarizability,
+        "magforces": args.compute_magforces,
     }
     logging.info(
         f"During training the following quantities will be reported: {', '.join([f'{report}' for report, value in output_args.items() if value])}"
@@ -87,6 +98,7 @@ def configure_model(
         "ScaleShiftMACE",
         "MACELES",
         "MACEField",
+        "PolarMACE",
     ]:
         logging.info("Loading FOUNDATION model")
         model_config_foundation = extract_config_mace_model(model_foundation)
@@ -109,9 +121,14 @@ def configure_model(
 
         args.max_L = model_config_foundation["hidden_irreps"].lmax
 
-        if (
-            args.model == "ScaleShiftMACE"
-            or model_foundation.__class__.__name__ == "ScaleShiftMACE"
+        if args.model in (
+            "ScaleShiftMACE",
+            "PolarMACE",
+            "MagneticScaleShiftMACE",
+        ) or model_foundation.__class__.__name__ in (
+            "ScaleShiftMACE",
+            "PolarMACE",
+            "MagneticScaleShiftMACE",
         ):
             model_config_foundation["atomic_inter_shift"] = (
                 _determine_atomic_inter_shift(args.mean, heads)
@@ -120,13 +137,12 @@ def configure_model(
             model_config_foundation["atomic_inter_shift"] = [0.0] * len(heads)
         model_config_foundation["atomic_inter_scale"] = [1.0] * len(heads)
         args.avg_num_neighbors = model_config_foundation["avg_num_neighbors"]
-        args.model = (
-            "FoundationMACELES"
-            if args.model == "MACELES"
-            else (
-                "FoundationMACEField" if args.model == "MACEField" else "FoundationMACE"
-            )
-        )
+        if args.model == "MACELES":
+            args.model = "FoundationMACELES"
+        elif args.model == "MACEField":
+            args.model = "FoundationMACEField"
+        elif args.model in ("MACE", "ScaleShiftMACE"):
+            args.model = "FoundationMACE"
         model_config_foundation["heads"] = heads
         model_config = model_config_foundation
 
@@ -195,6 +211,7 @@ def configure_model(
             atomic_numbers=z_table.zs,
             use_reduced_cg=args.use_reduced_cg,
             use_so3=args.use_so3,
+            use_edge_irreps_first=args.use_edge_irreps_first,
             cueq_config=cueq_config,
         )
         model_config_foundation = None
@@ -202,13 +219,18 @@ def configure_model(
     model = _build_model(args, model_config, model_config_foundation, heads)
 
     if model_foundation is not None:
-        model = load_foundations_elements(
-            model,
-            model_foundation,
-            z_table,
-            load_readout=args.foundation_filter_elements,
-            max_L=args.max_L,
-        )
+        if getattr(args, "finetune_dipoles_polarizabilities", False):
+            # MDP fine-tuning: dedicated loader that handles higher-order irreps
+            load_foundations_mdp(model, model_foundation, z_table, max_L=args.max_L)
+        else:
+            model = load_foundations_elements(
+                model,
+                model_foundation,
+                z_table,
+                load_readout=args.foundation_model_readout,
+                max_L=args.max_L,
+                default_dtype=dtype_dict.get(args.default_dtype, torch.float64),
+            )
 
     return model, output_args
 
@@ -229,13 +251,47 @@ def _determine_atomic_inter_shift(mean, heads):
     return [0.0] * len(heads)
 
 
+def _parse_literal_or_none(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.lower() in ("none", ""):
+            return None
+        return ast.literal_eval(stripped)
+    return value
+
+
 def _build_model(
     args, model_config, model_config_foundation, heads
 ):  # pylint: disable=too-many-return-statements
+
+    if args.model == "MagneticScaleShiftMACE":
+        m_max = resolve_m_max(args.m_max, list(model_config["atomic_numbers"]))
+        return modules.MagneticScaleShiftMACE(
+            **model_config,
+            pair_repulsion=args.pair_repulsion,
+            distance_transform=args.distance_transform,
+            correlation=args.correlation,
+            gate=modules.gate_dict[args.gate],
+            interaction_cls_first=modules.interaction_classes[args.interaction_first],
+            MLP_irreps=o3.Irreps(args.MLP_irreps),
+            atomic_inter_scale=args.std,
+            atomic_inter_shift=_determine_atomic_inter_shift(args.mean, heads),
+            radial_MLP=ast.literal_eval(args.radial_MLP),
+            radial_type=args.radial_type,
+            heads=heads,
+            m_max=m_max,
+            max_m_ell=args.max_m_ell,
+            num_mag_radial_basis=args.num_mag_radial_basis,
+            num_mag_radial_basis_one_body=args.num_mag_radial_basis_one_body,
+            use_magmom_one_body=args.use_magmom_one_body,
+        )
     if args.model == "MACE":
         if args.interaction_first not in [
             "RealAgnosticInteractionBlock",
             "RealAgnosticDensityInteractionBlock",
+            "RealAgnosticResidualNonLinearInteractionBlock",
         ]:
             args.interaction_first = "RealAgnosticInteractionBlock"
         return modules.ScaleShiftMACE(
@@ -275,6 +331,48 @@ def _build_model(
             use_last_readout_only=args.use_last_readout_only,
             use_agnostic_product=args.use_agnostic_product,
         )
+    if args.model == "PolarMACE" and model_config_foundation is not None:
+        return modules.PolarMACE(**model_config_foundation)
+    if args.model == "PolarMACE":
+        field_feature_widths = _parse_literal_or_none(args.field_feature_widths)
+        field_feature_norms = _parse_literal_or_none(args.field_feature_norms)
+        fixedpoint_update_config = _parse_literal_or_none(args.fixedpoint_update_config)
+        field_readout_config = _parse_literal_or_none(args.field_readout_config)
+        return modules.PolarMACE(
+            **model_config,
+            pair_repulsion=args.pair_repulsion,
+            distance_transform=args.distance_transform,
+            correlation=args.correlation,
+            gate=modules.gate_dict[args.gate],
+            interaction_cls_first=modules.interaction_classes[args.interaction_first],
+            MLP_irreps=o3.Irreps(args.MLP_irreps),
+            atomic_inter_scale=args.std,
+            atomic_inter_shift=_determine_atomic_inter_shift(args.mean, heads),
+            radial_MLP=ast.literal_eval(args.radial_MLP),
+            radial_type=args.radial_type,
+            heads=heads,
+            embedding_specs=args.embedding_specs,
+            use_embedding_readout=args.use_embedding_readout,
+            use_last_readout_only=args.use_last_readout_only,
+            use_agnostic_product=args.use_agnostic_product,
+            kspace_cutoff_factor=args.kspace_cutoff_factor,
+            atomic_multipoles_max_l=args.atomic_multipoles_max_l,
+            atomic_multipoles_smearing_width=args.atomic_multipoles_smearing_width,
+            field_feature_max_l=args.field_feature_max_l,
+            field_feature_widths=(
+                field_feature_widths if field_feature_widths is not None else [1.0]
+            ),
+            num_recursion_steps=args.num_recursion_steps,
+            field_si=args.field_si,
+            include_electrostatic_self_interaction=args.include_electrostatic_self_interaction,
+            add_local_electron_energy=args.add_local_electron_energy,
+            quadrupole_feature_corrections=args.quadrupole_feature_corrections,
+            return_electrostatic_potentials=args.return_electrostatic_potentials,
+            field_feature_norms=field_feature_norms,
+            field_norm_factor=args.field_norm_factor,
+            fixedpoint_update_config=fixedpoint_update_config,
+            field_readout_config=field_readout_config,
+        )
     if args.model == "FoundationMACE":
         return modules.ScaleShiftMACE(**model_config_foundation)
     if args.model == "FoundationMACELES":
@@ -285,13 +383,9 @@ def _build_model(
             **model_config_foundation,
         )
     if args.model == "FoundationMACEField":
-        from mace.modules.extensions import MACEField
-
         args.error_table = "PerAtomFieldRMSE"
         args.loss = "UniversalField"
-        return MACEField(
-            **model_config_foundation,
-        )
+        return modules.MACEField(**model_config_foundation)
     if args.model == "ScaleShiftBOTNet":
         # say it is deprecated
         raise RuntimeError("ScaleShiftBOTNet is deprecated, use MACE instead")
@@ -372,11 +466,9 @@ def _build_model(
             use_agnostic_product=args.use_agnostic_product,
         )
     if args.model == "MACEField":
-        from mace.modules.extensions import MACEField
-
         args.error_table = "PerAtomFieldRMSE"
         args.loss = "UniversalField"
-        return MACEField(
+        return modules.MACEField(
             **model_config,
             pair_repulsion=args.pair_repulsion,
             distance_transform=args.distance_transform,

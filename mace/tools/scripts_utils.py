@@ -34,10 +34,13 @@ class SubsetCollection:
 def log_dataset_contents(dataset: data.Configurations, dataset_name: str) -> None:
     log_string = f"{dataset_name} ["
     for prop_name in dataset[0].properties.keys():
+        count = sum(
+            1 for config in dataset if config.properties.get(prop_name) is not None
+        )
         if prop_name == "dipole":
-            log_string += f"{prop_name} components: {int(np.sum([np.sum(config.property_weights.get(prop_name, 0.0)) for config in dataset]))}, "
+            log_string += f"{prop_name} components: {count}, "
         else:
-            log_string += f"{prop_name}: {int(np.sum([config.property_weights.get(prop_name, 0.0) for config in dataset]))}, "
+            log_string += f"{prop_name}: {count}, "
     log_string = log_string[:-2] + "]"
     logging.info(log_string)
 
@@ -225,8 +228,17 @@ def print_git_commit():
 
 
 def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
-    if model.__class__.__name__ not in ["ScaleShiftMACE", "MACELES", "MACEField"]:
-        return {"error": "Model is not a ScaleShiftMACE, MACELES or MACEField model"}
+    if model.__class__.__name__ not in [
+        "ScaleShiftMACE",
+        "MACELES",
+        "MACEField",
+        "PolarMACE",
+        "MagneticScaleShiftMACE",
+        "AtomicDielectricMACE",
+    ]:
+        return {
+            "error": "Model is not a ScaleShiftMACE, MACELES, MACEField, PolarMACE, MagneticScaleShiftMACE, or AtomicDielectricMACE model"
+        }
 
     def radial_to_name(radial_type):
         if radial_type == "BesselBasis":
@@ -246,14 +258,20 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
             return "Soft"
         return radial.distance_transform.__class__.__name__
 
-    scale = model.scale_shift.scale
-    shift = model.scale_shift.shift
+    if hasattr(model, "scale_shift"):
+        scale = model.scale_shift.scale
+        shift = model.scale_shift.shift
     heads = model.heads if hasattr(model, "heads") else ["default"]
-    model_mlp_irreps = (
-        o3.Irreps(str(model.readouts[-1].hidden_irreps))
-        if model.num_interactions.item() > 1
-        else 1
-    )
+    if hasattr(model.readouts[-1], "hidden_irreps"):
+        model_mlp_irreps = o3.Irreps(str(model.readouts[-1].hidden_irreps))
+    else:
+        model_mlp_irreps = o3.Irreps("1x0e")
+    mlp_scalars_per_head = max(1, model_mlp_irreps.count((0, 1)) // len(heads))
+    gate = None
+    if hasattr(model.readouts[-1], "non_linearity"):
+        acts = getattr(model.readouts[-1].non_linearity, "acts", None)
+        if acts is not None and len(acts) > 0 and hasattr(acts[0], "f"):
+            gate = acts[0].f
     try:
         correlation = (
             len(model.products[0].symmetric_contractions.contractions[0].weights) + 1
@@ -271,18 +289,8 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
         "num_elements": len(model.atomic_numbers),
         "hidden_irreps": o3.Irreps(str(model.products[0].linear.irreps_out)),
         "edge_irreps": model.edge_irreps if hasattr(model, "edge_irreps") else None,
-        "MLP_irreps": (
-            o3.Irreps(f"{model_mlp_irreps.count((0, 1)) // len(heads)}x0e")
-            if model.num_interactions.item() > 1
-            else 1
-        ),
-        "gate": (
-            model.readouts[-1]  # pylint: disable=protected-access
-            .non_linearity._modules["acts"][0]
-            .f
-            if model.num_interactions.item() > 1
-            else None
-        ),
+        "MLP_irreps": o3.Irreps(f"{mlp_scalars_per_head}x0e"),
+        "gate": gate,
         "use_reduced_cg": (
             model.use_reduced_cg if hasattr(model, "use_reduced_cg") else False
         ),
@@ -305,7 +313,6 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
         "use_embedding_readout": (hasattr(model, "embedding_readout")),
         "readout_cls": model.readouts[-1].__class__,
         "cueq_config": model.cueq_config if hasattr(model, "cueq_config") else None,
-        "atomic_energies": model.atomic_energies_fn.atomic_energies.cpu().numpy(),
         "avg_num_neighbors": model.interactions[0].avg_num_neighbors,
         "atomic_numbers": model.atomic_numbers,
         "correlation": correlation,
@@ -319,14 +326,66 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
         "radial_MLP": extract_radial_MLP(model),
         "pair_repulsion": hasattr(model, "pair_repulsion_fn"),
         "distance_transform": radial_to_transform(model.radial_embedding),
-        "atomic_inter_scale": scale.cpu().numpy(),
-        "atomic_inter_shift": shift.cpu().numpy(),
         "heads": heads,
     }
+    if model.__class__.__name__ == "MagneticScaleShiftMACE":
+        config["m_max"] = model.m_max.cpu().tolist()
+        config["max_m_ell"] = int(model.mag_solid_harmoics.SH.l_max())
+        config["num_mag_radial_basis"] = int(model.mag_radial_embedding.num_basis)
+        config["use_magmom_one_body"] = bool(model.use_magmom_one_body)
+        if model.use_magmom_one_body and hasattr(model, "onebody_magmombasis_coeffs"):
+            config["num_mag_radial_basis_one_body"] = int(
+                model.onebody_magmombasis_coeffs.shape[1]
+            )
+    if hasattr(model, "atomic_energies_fn"):
+        config["atomic_energies"] = (
+            model.atomic_energies_fn.atomic_energies.cpu().numpy()
+        )
+    if hasattr(model, "scale_shift"):
+        config["atomic_inter_scale"] = scale.cpu().numpy()
+        config["atomic_inter_shift"] = shift.cpu().numpy()
+    if model.__class__.__name__ in ["ScaleShiftMACE", "MACELES", "MACEField"]:
+        config["MLP_irreps"] = o3.Irreps(f"{mlp_scalars_per_head}x0e")
     if model.__class__.__name__ == "AtomicDielectricMACE":
         config["use_polarizability"] = model.use_polarizability
         config["only_dipole"] = False  # model.only_dipole
         config["gate"] = torch.nn.functional.silu
+        config["MLP_irreps"] = model_mlp_irreps
+    if model.__class__.__name__ == "PolarMACE":
+        if hasattr(model, "fukui_source_map") and hasattr(
+            model.fukui_source_map, "hidden_irreps"
+        ):
+            config["MLP_irreps"] = o3.Irreps(str(model.fukui_source_map.hidden_irreps))
+        if hasattr(model, "fukui_source_map") and hasattr(
+            model.fukui_source_map, "non_linearity"
+        ):
+            acts = getattr(model.fukui_source_map.non_linearity, "acts", None)
+            if acts is not None and len(acts) > 0 and hasattr(acts[0], "f"):
+                config["gate"] = acts[0].f
+        config["kspace_cutoff_factor"] = model.kspace_cutoff_factor
+        config["atomic_multipoles_max_l"] = model.atomic_multipoles_max_l
+        config["atomic_multipoles_smearing_width"] = (
+            model.atomic_multipoles_smearing_width
+        )
+        config["field_feature_max_l"] = model.field_feature_max_l
+        config["field_feature_widths"] = model.field_feature_widths
+        config["field_feature_norms"] = getattr(model, "_field_feature_norms")
+        config["num_recursion_steps"] = model.num_recursion_steps
+        config["include_electrostatic_self_interaction"] = (
+            model.include_electrostatic_self_interaction
+        )
+        config["add_local_electron_energy"] = model.add_local_electron_energy
+        config["quadrupole_feature_corrections"] = model.quadrupole_feature_corrections
+        config["return_electrostatic_potentials"] = (
+            model.return_electrostatic_potentials
+        )
+        config["field_norm_factor"] = model.field_norm_factor
+        config["field_si"] = model.field_si
+        config["fixedpoint_update_config"] = getattr(
+            model, "_fixedpoint_update_config"
+        ).copy()
+        config["field_readout_config"] = getattr(model, "_field_readout_config").copy()
+        config["keep_last_layer_irreps"] = model.keep_last_layer_irreps
     return config
 
 
@@ -468,7 +527,7 @@ def remove_pt_head(
 
 def extract_model(model: torch.nn.Module, map_location: str = "cpu") -> torch.nn.Module:
     model_copy = model.__class__(**extract_config_mace_model(model))
-    model_copy.load_state_dict(model.state_dict())
+    model_copy.load_state_dict(model.state_dict(), strict=False)
     return model_copy.to(map_location)
 
 
@@ -545,6 +604,91 @@ def load_from_json(f: str, map_location: str = "cpu") -> torch.nn.Module:
     return model_load_yaml.to(map_location)
 
 
+def resolve_m_max(
+    m_max: Any,
+    atomic_numbers: List[int],
+    default: float = 1.0,
+) -> Optional[List[float]]:
+    """Turn --m_max into a per-element list ordered by atomic_numbers.
+
+    Accepts:
+      * None  -> returns None (caller decides on a default).
+      * A list[float]  -> validated against len(atomic_numbers) and returned as-is.
+        This covers the legacy ``nargs="+"`` form and the dict-of-floats already
+        populated by ``inherit_magnetic_hyperparameters_from_foundation``.
+      * A single-element list with a dict literal string, e.g. ``["{26: 1.8, 28: 1.2}"]``
+        as produced by ``argparse(nargs="+", type=str)`` when the user passes
+        ``--m_max '{26: 1.8, 28: 1.2}'``. Missing elements use ``default``.
+      * A list of float-like strings (legacy ``--m_max 0.51 0.109 …`` form) ->
+        parsed as floats, validated against len(atomic_numbers).
+
+    ``atomic_numbers`` is the per-element ordering the model expects, typically
+    ``z_table.zs``.
+    """
+    if m_max is None:
+        return None
+
+    # Fast path: already a list of numbers (e.g. inherited from foundation).
+    if isinstance(m_max, list) and all(
+        isinstance(v, (int, float)) and not isinstance(v, bool) for v in m_max
+    ):
+        if len(m_max) != len(atomic_numbers):
+            raise ValueError(
+                f"--m_max float list has length {len(m_max)} but expected "
+                f"{len(atomic_numbers)} to match atomic_numbers {atomic_numbers}"
+            )
+        return [float(v) for v in m_max]
+
+    # argparse with nargs="+", type=str gives us a list of token strings.
+    tokens = m_max if isinstance(m_max, list) else [m_max]
+
+    if len(tokens) == 1:
+        token = tokens[0]
+        try:
+            parsed = ast.literal_eval(token)
+        except (ValueError, SyntaxError):
+            parsed = None
+        if isinstance(parsed, dict):
+            # Normalize keys to python ints to compare against atomic_numbers
+            # (which may be a list of np.int64).
+            normalized = {int(k): float(v) for k, v in parsed.items()}
+            atomic_numbers_int = [int(z) for z in atomic_numbers]
+            extras = sorted(set(normalized) - set(atomic_numbers_int))
+            if extras:
+                logging.info(
+                    f"--m_max dict has entries for atomic numbers {extras} not in the "
+                    f"current z_table; they are ignored. (This is normal when the dict "
+                    f"is a generic over-spec.)"
+                )
+            resolved = [normalized.get(z, default) for z in atomic_numbers_int]
+            logging.info(
+                f"Resolved --m_max dict to per-element list (default={default} for "
+                f"unspecified): {dict(zip(atomic_numbers_int, resolved))}"
+            )
+            return resolved
+        # Single non-dict token: assume a single float.
+        try:
+            return [float(token)] * len(atomic_numbers)
+        except ValueError as exc:
+            raise ValueError(
+                f"--m_max single token {token!r} is neither a dict literal nor a float"
+            ) from exc
+
+    # Multi-token: legacy space-separated float list.
+    try:
+        values = [float(t) for t in tokens]
+    except ValueError as exc:
+        raise ValueError(
+            f"--m_max values {tokens!r} could not be parsed as floats"
+        ) from exc
+    if len(values) != len(atomic_numbers):
+        raise ValueError(
+            f"--m_max has {len(values)} floats but expected {len(atomic_numbers)} "
+            f"to match atomic_numbers {atomic_numbers}"
+        )
+    return values
+
+
 def get_atomic_energies(E0s, train_collection, z_table) -> dict:
     if E0s is not None:
         logging.info(
@@ -560,10 +704,6 @@ def get_atomic_energies(E0s, train_collection, z_table) -> dict:
                 atomic_energies_dict = data.compute_average_E0s(
                     train_collection, z_table
                 )
-                atomic_energies_dict = {
-                    key: value if not np.isnan(value) else 0.0
-                    for key, value in atomic_energies_dict.items()
-                }
             except Exception as e:
                 raise RuntimeError(
                     f"Could not compute average E0s if no training xyz given, error {e} occured"
@@ -665,6 +805,7 @@ def get_loss_fn(
             energy_weight=args.energy_weight,
             forces_weight=args.forces_weight,
             stress_weight=args.stress_weight,
+            magforces_weight=args.magforces_weight,
             huber_delta=args.huber_delta,
         )
     elif args.loss == "l1l2energyforces":
@@ -770,10 +911,11 @@ def get_swa(
             energy_weight=args.swa_energy_weight,
             forces_weight=args.swa_forces_weight,
             stress_weight=args.swa_stress_weight,
+            magforces_weight=args.swa_magforces_weight,
             huber_delta=args.huber_delta,
         )
         logging.info(
-            f"Stage Two (after {args.start_swa} epochs) with loss function: {loss_fn_energy}, with energy weight : {args.swa_energy_weight}, forces weight : {args.swa_forces_weight}, stress weight : {args.swa_stress_weight} and learning rate : {args.swa_lr}"
+            f"Stage Two (after {args.start_swa} epochs) with loss function: {loss_fn_energy}, with energy weight : {args.swa_energy_weight}, forces weight : {args.swa_forces_weight}, stress weight : {args.swa_stress_weight}, magforces weight : {args.swa_magforces_weight} and learning rate : {args.swa_lr}"
         )
     elif args.loss in ("universal_field", "UniversalField"):
         loss_fn_energy = modules.UniversalFieldLoss(
@@ -790,11 +932,7 @@ def get_swa(
             polarizability_weight=args.swa_polarizability_weight,
             huber_delta=args.huber_delta,
         )
-        logging.info(
-            f"Stage Two (after {args.start_swa} epochs) with loss function: {loss_fn_energy}, with energy weight : {args.swa_energy_weight}, forces weight : {args.swa_forces_weight}, stress weight : {args.swa_stress_weight}, polarization weight : {args.swa_polarization_weight}, becs weight : {args.swa_becs_weight}, polarizability weight : {args.swa_polarizability_weight} and learning rate : {args.swa_lr}"
-        )
     else:
-        print(args.loss)
         loss_fn_energy = modules.WeightedEnergyForcesLoss(
             energy_weight=args.swa_energy_weight,
             forces_weight=args.swa_forces_weight,
@@ -816,6 +954,11 @@ def get_swa(
     return swa, swas
 
 
+def freeze_module(module: torch.nn.Module, freeze: bool = True):
+    for p in module.parameters():
+        p.requires_grad = not freeze
+
+
 def get_params_options(
     args: argparse.Namespace, model: torch.nn.Module
 ) -> Dict[str, Any]:
@@ -827,77 +970,133 @@ def get_params_options(
         else:
             no_decay_interactions[name] = param
 
+    lr_params_factors = json.loads(args.lr_params_factors)
+
+    if args.freeze:
+        if args.freeze >= 7:
+            logging.info("Freezing readout weights")
+            lr_params_factors["readouts_lr_factor"] = 0.0
+            freeze_module(model.readouts, True)
+        if args.freeze >= 6:
+            logging.info("Freezing product weights")
+            lr_params_factors["products_lr_factor"] = 0.0
+            freeze_module(model.products, True)
+        if args.freeze >= 5:
+            logging.info("Freezing interaction linear weights")
+            lr_params_factors["interactions_lr_factor"] = 0.0
+            freeze_module(model.interactions, True)
+        if args.freeze >= 1:
+            logging.info("Freezing embedding weights")
+            lr_params_factors["embedding_lr_factor"] = 0.0
+            freeze_module(model.node_embedding, True)
+
     param_options = dict(
         params=[
             {
                 "name": "embedding",
                 "params": model.node_embedding.parameters(),
                 "weight_decay": 0.0,
+                "lr": lr_params_factors.get("embedding_lr_factor", 1.0) * args.lr,
             },
             {
                 "name": "interactions_decay",
                 "params": list(decay_interactions.values()),
                 "weight_decay": args.weight_decay,
+                "lr": lr_params_factors.get("interactions_lr_factor", 1.0) * args.lr,
             },
             {
                 "name": "interactions_no_decay",
                 "params": list(no_decay_interactions.values()),
                 "weight_decay": 0.0,
+                "lr": lr_params_factors.get("interactions_lr_factor", 1.0) * args.lr,
             },
             {
                 "name": "products",
                 "params": model.products.parameters(),
                 "weight_decay": args.weight_decay,
+                "lr": lr_params_factors.get("products_lr_factor", 1.0) * args.lr,
             },
             {
                 "name": "readouts",
                 "params": model.readouts.parameters(),
                 "weight_decay": 0.0,
+                "lr": lr_params_factors.get("readouts_lr_factor", 1.0) * args.lr,
             },
         ],
         lr=args.lr,
         amsgrad=args.amsgrad,
         betas=(args.beta, 0.999),
     )
-    if hasattr(model, "joint_embedding") and model.joint_embedding is not None:
+    # Optional submodules that only exist on some model classes (joint
+    # embeddings, MACELES, PolarMACE). Each gets its own named group so that
+    # every trainable parameter is registered explicitly; weight decay stays
+    # off because these blocks mix biases, gates, and physically meaningful
+    # scalars that must not be regularized toward zero.
+    optional_submodule_names = [
+        "radial_embedding",
+        "pair_repulsion_fn",
+        "joint_embedding",
+        "embedding_readout",
+        "les_readouts",
+        "les",
+        "lr_source_maps",
+        "fukui_source_map",
+        "field_dependent_charges_maps",
+        "local_electron_energy",
+        "layer_feature_mixer",
+        "field_feats",
+        "field_linear",
+    ]
+    for submodule_name in optional_submodule_names:
+        submodule = getattr(model, submodule_name, None)
+        if submodule is None:
+            continue
+        submodule_parameters = list(submodule.parameters())
+        if not submodule_parameters:
+            continue
         param_options["params"].append(
             {
-                "name": "joint_embedding",
-                "params": model.joint_embedding.parameters(),
+                "name": submodule_name,
+                "params": submodule_parameters,
                 "weight_decay": 0.0,
             }
         )
-    if hasattr(model, "embedding_readout") and model.embedding_readout is not None:
+
+    if (
+        hasattr(model, "onebody_magmombasis_coeffs")
+        and args.train_one_body_contribution
+    ):
         param_options["params"].append(
             {
-                "name": "embedding_readout",
-                "params": model.embedding_readout.parameters(),
+                "name": "onebody_magmombasis_coeffs",
+                "params": [model.onebody_magmombasis_coeffs],
                 "weight_decay": 0.0,
             }
         )
-    if hasattr(model, "les_readouts") and model.les_readouts is not None:
-        param_options["params"].append(
-            {
-                "name": "les_readouts",
-                "params": model.les_readouts.parameters(),
-                "weight_decay": 0.0,
-            }
-        )
-    if hasattr(model, "field_feats") and model.field_feats is not None:
-        param_options["params"].append(
-            {
-                "name": "field_feats",
-                "params": model.field_feats.parameters(),
-                "weight_decay": args.weight_decay,
-            }
-        )
-    if hasattr(model, "field_linear") and model.field_linear is not None:
-        param_options["params"].append(
-            {
-                "name": "field_linear",
-                "params": model.field_linear.parameters(),
-                "weight_decay": args.weight_decay,
-            }
+
+    # Guard against silently untrained submodules: any trainable parameter
+    # that no group claims would never receive optimizer updates.Submodules
+    # that build their parameters lazily inside the first forward() (e.g. the
+    # external LES Atomwise MLP (created only when les_arguments
+    # ["use_atomwise"] is True) do not exist yet here, so they slip past both
+    # the parameter groups and this check. MACELES with the default
+    # use_atomwise=False has no such parameters.
+    claimed_parameter_ids = set()
+    for group in param_options["params"]:
+        group["params"] = list(group["params"])
+        claimed_parameter_ids.update(id(p) for p in group["params"])
+    unregistered_parameter_names = [
+        parameter_name
+        for parameter_name, parameter in model.named_parameters()
+        if parameter.requires_grad and id(parameter) not in claimed_parameter_ids
+    ]
+    if unregistered_parameter_names:
+        raise ValueError(
+            f"{len(unregistered_parameter_names)} trainable parameters of "
+            f"{type(model).__name__} are not registered in any optimizer "
+            "parameter group and would never be updated during training. Add "
+            "their submodules to the parameter groups in get_params_options:\n"
+            + "\n".join(unregistered_parameter_names)
         )
     return param_options
 
@@ -915,7 +1114,12 @@ def get_optimizer(
                 "`schedulefree` is not installed. Please install it via `pip install schedulefree` or `pip install mace-torch[schedulefree]`"
             ) from exc
         _param_options = {k: v for k, v in param_options.items() if k != "amsgrad"}
-        optimizer = adamw_schedulefree.AdamWScheduleFree(**_param_options)
+        _param_options.pop("betas", None)
+        optimizer = adamw_schedulefree.AdamWScheduleFree(
+            **_param_options,
+            betas=(args.beta1_schedulefree, args.beta2_schedulefree),
+            warmup_steps=args.warmup_steps_schedulefree,
+        )
     else:
         optimizer = torch.optim.Adam(**param_options)
     return optimizer

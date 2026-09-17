@@ -19,6 +19,17 @@ from mace.tools.torch_geometric.batch import Batch
 from .blocks import AtomicEnergiesBlock
 
 
+def safe_double(t: torch.Tensor) -> torch.Tensor:
+    """Cast to float64 for accumulation precision, except on MPS.
+
+    The Apple-Silicon MPS backend does not support float64, so there the
+    tensor is returned unchanged in its working dtype.
+    """
+    if t.device.type == "mps":
+        return t
+    return t.double()
+
+
 def compute_forces(
     energy: torch.Tensor, positions: torch.Tensor, training: bool = True
 ) -> torch.Tensor:
@@ -76,6 +87,7 @@ def get_symmetric_displacement(
     edge_index: torch.Tensor,
     num_graphs: int,
     batch: torch.Tensor,
+    displacement: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if cell is None:
         cell = torch.zeros(
@@ -85,12 +97,13 @@ def get_symmetric_displacement(
             device=positions.device,
         )
     sender = edge_index[0]
-    displacement = torch.zeros(
-        (num_graphs, 3, 3),
-        dtype=positions.dtype,
-        device=positions.device,
-    )
-    displacement.requires_grad_(True)
+    if displacement is None:
+        displacement = torch.zeros(
+            (num_graphs, 3, 3),
+            dtype=positions.dtype,
+            device=positions.device,
+        )
+        displacement = displacement + positions.sum() * 0.0
     symmetric_displacement = 0.5 * (
         displacement + displacement.transpose(-1, -2)
     )  # From https://github.com/mir-group/nequip
@@ -162,26 +175,136 @@ def compute_hessians_loop(
     return hessian
 
 
+def compute_forces_virials_magforces(
+    energy: torch.Tensor,
+    positions: torch.Tensor,
+    displacement: torch.Tensor,
+    cell: torch.Tensor,
+    magmoms: torch.Tensor,
+    training: bool = True,
+    compute_stress: bool = False,
+) -> Tuple[
+    torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]
+]:
+
+    # forces correct static type
+    grad_outputs = torch.jit.annotate(
+        List[Optional[torch.Tensor]], [torch.ones_like(energy)]
+    )
+
+    # Pack all inputs into a list
+    inputs = [positions, displacement, magmoms]
+
+    grads = torch.autograd.grad(
+        outputs=[energy],
+        inputs=inputs,
+        grad_outputs=grad_outputs,
+        retain_graph=training,
+        create_graph=training,
+        allow_unused=True,
+    )
+
+    # Explicit unwrapping of Optionals for torch compile
+    forces_opt = grads[0]
+    virials_opt = grads[1]
+    mag_forces_opt = grads[2]
+
+    forces = forces_opt if forces_opt is not None else torch.zeros_like(positions)
+    virials = virials_opt if virials_opt is not None else torch.zeros_like(displacement)
+    mag_forces = (
+        mag_forces_opt if mag_forces_opt is not None else torch.zeros_like(magmoms)
+    )
+
+    # Compute stress if requested
+    stress = torch.zeros_like(displacement)
+    if compute_stress:
+        cell = cell.view(-1, 3, 3)
+        volume = torch.linalg.det(cell).abs().unsqueeze(-1)
+        stress = virials / volume.view(-1, 1, 1)
+        stress = torch.where(torch.abs(stress) < 1e10, stress, torch.zeros_like(stress))
+
+    return -forces, -virials, stress, -mag_forces
+
+
+def compute_forces_magforces(
+    energy: torch.Tensor,
+    positions: torch.Tensor,
+    magmoms: torch.Tensor,
+    training: bool = True,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """
+    Compute atomic forces and magnetic forces in a single autograd pass.
+
+    Returns:
+        -forces: dE/d(positions)
+        -mag_forces: dE/d(magmoms), or None if magmoms not provided
+    """
+
+    # forces correct static type
+    grad_outputs = torch.jit.annotate(
+        List[Optional[torch.Tensor]], [torch.ones_like(energy)]
+    )
+
+    inputs = [positions, magmoms]
+    grads = torch.autograd.grad(
+        outputs=[energy],
+        inputs=inputs,
+        grad_outputs=grad_outputs,
+        retain_graph=training,
+        create_graph=training,
+        allow_unused=True,
+    )
+
+    # Explicitly unwrap Optionals so TorchScript knows they are Tensors
+    forces_opt = grads[0]
+    mag_forces_opt = grads[1]
+
+    forces = forces_opt if forces_opt is not None else torch.zeros_like(positions)
+    mag_forces = (
+        mag_forces_opt if mag_forces_opt is not None else torch.zeros_like(magmoms)
+    )
+
+    return -forces, -mag_forces
+
+
 def get_outputs(
     energy: torch.Tensor,
     positions: torch.Tensor,
     cell: torch.Tensor,
     displacement: Optional[torch.Tensor],
     vectors: Optional[torch.Tensor] = None,
+    magmoms: Optional[torch.Tensor] = None,
     training: bool = False,
     compute_force: bool = True,
     compute_virials: bool = True,
     compute_stress: bool = True,
     compute_hessian: bool = False,
     compute_edge_forces: bool = False,
+    compute_magforces: bool = False,
 ) -> Tuple[
     Optional[torch.Tensor],
     Optional[torch.Tensor],
     Optional[torch.Tensor],
     Optional[torch.Tensor],
     Optional[torch.Tensor],
+    Optional[torch.Tensor],
 ]:
-    if (compute_virials or compute_stress) and displacement is not None:
+
+    if (
+        (compute_virials or compute_stress) and displacement is not None
+    ) and compute_magforces:
+        if magmoms is None:
+            raise ValueError("Magnetic moment must be provided to get magnetic forces")
+        forces, virials, stress, mag_forces = compute_forces_virials_magforces(
+            energy=energy,
+            positions=positions,
+            displacement=displacement,
+            cell=cell,
+            magmoms=magmoms,
+            training=(training or compute_hessian or compute_edge_forces),
+            compute_stress=True,
+        )
+    elif (compute_virials or compute_stress) and displacement is not None:
         forces, virials, stress = compute_forces_virials(
             energy=energy,
             positions=positions,
@@ -190,6 +313,17 @@ def get_outputs(
             compute_stress=compute_stress,
             training=(training or compute_hessian or compute_edge_forces),
         )
+        mag_forces = None
+    elif compute_force and compute_magforces:
+        if magmoms is None:
+            raise ValueError("Magnetic moment must be provided to get magnetic forces")
+        forces, mag_forces = compute_forces_magforces(
+            energy=energy,
+            positions=positions,
+            magmoms=magmoms,
+            training=(training or compute_hessian or compute_edge_forces),
+        )
+        virials, stress = None, None
     elif compute_force:
         forces, virials, stress = (
             compute_forces(
@@ -200,8 +334,9 @@ def get_outputs(
             None,
             None,
         )
+        mag_forces = None
     else:
-        forces, virials, stress = (None, None, None)
+        forces, virials, stress, mag_forces = (None, None, None, None)
     if compute_hessian:
         assert forces is not None, "Forces must be computed to get the hessian"
         hessian = compute_hessians_vmap(forces, positions)
@@ -217,7 +352,7 @@ def get_outputs(
             edge_forces = -1 * edge_forces  # Match LAMMPS sign convention
     else:
         edge_forces = None
-    return forces, virials, stress, hessian, edge_forces
+    return forces, virials, stress, hessian, edge_forces, mag_forces
 
 
 def get_atomic_virials_stresses(
@@ -502,6 +637,31 @@ def compute_fixed_charge_dipole_polar(
     return scatter_sum(src=mu, index=batch.unsqueeze(-1), dim=0, dim_size=num_graphs)
 
 
+def compute_total_charge_dipole_permuted(
+    density_coefficients: torch.Tensor,
+    positions: torch.Tensor,
+    batch: torch.Tensor,
+    num_graphs: int,
+):
+    dipole_contribution = positions * density_coefficients[:, :1]
+
+    dipole = scatter_sum(
+        src=dipole_contribution, index=batch.unsqueeze(-1), dim=0, dim_size=num_graphs
+    )
+
+    if density_coefficients.shape[1] > 1:
+        dipole_p = scatter_sum(
+            src=density_coefficients[..., 1:4], index=batch, dim=-2, dim_size=num_graphs
+        )
+        dipole = dipole + dipole_p[..., [2, 0, 1]]  # CS phase convention
+
+    total_charge = scatter_sum(
+        src=density_coefficients[:, 0], index=batch, dim=-1  # , dim_size=num_graphs
+    )
+
+    return total_charge, dipole
+
+
 @torch.jit.ignore
 def compute_dielectric_gradients(
     dielectric: torch.Tensor,
@@ -655,7 +815,7 @@ def prepare_graph(
     )
 
     if lammps_mliap:
-        n_real, n_total = data["natoms"][0], data["natoms"][1]
+        n_real, n_ghost = data["natoms"][0], data["natoms"][1]
         num_graphs = 2
         num_atoms_arange = torch.arange(n_real, device=data["node_attrs"].device)
         displacement = None
@@ -671,7 +831,7 @@ def prepare_graph(
         )
         vectors = data["vectors"].requires_grad_(True)
         lengths = torch.linalg.vector_norm(vectors, dim=1, keepdim=True)
-        ikw = InteractionKwargs(data["lammps_class"], (n_real, n_total))
+        ikw = InteractionKwargs(data["lammps_class"], (n_real, n_ghost))
     else:
         if not torch.compiler.is_compiling():
             data["positions"].requires_grad_(True)
@@ -690,6 +850,7 @@ def prepare_graph(
                 edge_index=data["edge_index"],
                 num_graphs=num_graphs,
                 batch=data["batch"],
+                displacement=data.get("displacement"),
             )
             data["positions"], data["shifts"] = p, s
         vectors, lengths = get_edge_vectors_and_lengths(

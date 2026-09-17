@@ -27,6 +27,8 @@ from mace.calculators.foundations_models import (
     mace_mp_names,
     mace_off,
     mace_omol,
+    mace_polar,
+    polar_model_names,
 )
 from mace.cli.convert_cueq_e3nn import run as run_cueq_to_e3nn
 from mace.cli.convert_e3nn_cueq import run as run_e3nn_to_cueq
@@ -34,6 +36,7 @@ from mace.cli.convert_e3nn_oeq import run as run_e3nn_to_oeq
 from mace.cli.convert_oeq_e3nn import run as run_oeq_to_e3nn
 from mace.cli.visualise_train import TrainingPlotter
 from mace.data import KeySpecification, update_keyspec_from_kwargs
+from mace.modules.lora import inject_LoRAs, merge_lora_weights
 from mace.tools import torch_geometric
 from mace.tools.distributed_tools import init_distributed
 from mace.tools.model_script_utils import configure_model
@@ -42,6 +45,7 @@ from mace.tools.multihead_tools import (
     apply_pseudolabels_to_pt_head_configs,
     assemble_replay_data,
     dict_head_to_dataclass,
+    inherit_magnetic_hyperparameters_from_foundation,
     prepare_default_head,
     prepare_pt_head,
 )
@@ -133,8 +137,50 @@ def run(args) -> None:
     valid_mace_mp_models = [name for name in mace_mp_names if name is not None]
     args.foundation_model_kwargs = ast.literal_eval(args.foundation_model_kwargs)
     args.foundation_model_kwargs["head"] = args.foundation_head
+
+    # MDP fine-tuning validation
+    if args.finetune_dipoles_polarizabilities:
+        if args.model != "AtomicDielectricMACE":
+            raise ValueError(
+                "--finetune_dipoles_polarizabilities only supports "
+                "--model AtomicDielectricMACE"
+            )
+        if args.foundation_model is None:
+            raise ValueError(
+                "--foundation_model must be provided when using "
+                "--finetune_dipoles_polarizabilities"
+            )
+        if args.loss not in ("weighted", "dipole_polar"):
+            raise ValueError(
+                "--finetune_dipoles_polarizabilities requires --loss dipole_polar "
+                f"(got --loss={args.loss})"
+            )
+        args.loss = "dipole_polar"
+        # multiheads_finetuning defaults to True and would override loss to "universal"
+        args.multiheads_finetuning = False
+        # AtomicDielectricMACE has no atomic_energies_fn, so E0s="foundation"/"estimated" crash
+        if args.E0s is not None and args.E0s.lower() in ("foundation", "estimated"):
+            logging.warning(
+                f"--E0s={args.E0s} is not supported for AtomicDielectricMACE "
+                "(no atomic_energies_fn); falling back to --E0s=average"
+            )
+            args.E0s = "average"
+        logging.info(
+            "MDP fine-tuning mode: loss=dipole_polar, multiheads_finetuning disabled"
+        )
+
     if args.foundation_model is not None:
-        if args.foundation_model in valid_mace_mp_models:
+        if args.foundation_model in polar_model_names:
+            logging.info(
+                f"Using Polar foundation model {args.foundation_model} as initial checkpoint."
+            )
+            model_foundation = mace_polar(
+                model=args.foundation_model,
+                device=args.device,
+                default_dtype=args.default_dtype,
+                return_raw_model=True,
+            )
+        elif args.foundation_model in valid_mace_mp_models:
             logging.info(
                 f"Using foundation model mace {args.foundation_model} as initial checkpoint."
             )
@@ -172,6 +218,20 @@ def run(args) -> None:
                 f"Using foundation model {args.foundation_model} as initial checkpoint."
             )
         args.r_max = model_foundation.r_max.item()
+        inherited_magnetic_args = inherit_magnetic_hyperparameters_from_foundation(
+            args, model_foundation
+        )
+        if inherited_magnetic_args:
+            logging.info(
+                f"Inheriting magnetic hyperparameters from foundation model: {inherited_magnetic_args}"
+            )
+        if args.finetune_dipoles_polarizabilities:
+            foundation_cls = model_foundation.__class__.__name__
+            if foundation_cls != "AtomicDielectricMACE":
+                raise ValueError(
+                    f"--finetune_dipoles_polarizabilities requires an AtomicDielectricMACE "
+                    f"checkpoint, but --foundation_model contains a {foundation_cls} model."
+                )
         foundation_model_avg_num_neighbors = model_foundation.interactions[
             0
         ].avg_num_neighbors
@@ -188,7 +248,6 @@ def run(args) -> None:
             assert (
                 args.E0s != "average"
             ), "average atomic energies cannot be used for multiheads finetuning"
-            # check that the foundation model has a single head, if not, use the first head
             if not args.force_mh_ft_lr:
                 logging.info(
                     "Multihead finetuning mode, setting learning rate to 0.0001 and EMA to True. To use a different learning rate, set --force_mh_ft_lr=True."
@@ -201,8 +260,8 @@ def run(args) -> None:
             )
         if hasattr(model_foundation, "heads"):
             if len(model_foundation.heads) > 1:
-                logging.warning(
-                    f"Mutlihead finetuning with models with more than one head is not supported, using the head {args.foundation_head} as foundation head."
+                logging.info(
+                    f"Selecting the head {args.foundation_head} as foundation head."
                 )
                 model_foundation = remove_pt_head(
                     model_foundation, args.foundation_head
@@ -282,7 +341,12 @@ def run(args) -> None:
                 head_config.atomic_energies_dict = ast.literal_eval(
                     statistics["atomic_energies"]
                 )
-        if head_config.train_file in (["mp"], ["matpes_pbe"], ["matpes_r2scan"]):
+        if head_config.train_file in (
+            ["mp"],
+            ["matpes_pbe"],
+            ["matpes_r2scan"],
+            ["omat"],
+        ):
             assert (
                 head_config.head_name == "pt_head"
             ), "Only pt_head should use mp as train_file"
@@ -326,7 +390,6 @@ def run(args) -> None:
                     args.pseudolabel_replay
                     and args.multiheads_finetuning
                     and head_config.head_name == "pt_head"
-                    or args.model == "MACEField"
                 ),
                 prefix=args.name,
             )
@@ -364,10 +427,7 @@ def run(args) -> None:
         logging.info(
             "==================Using multiheads finetuning mode=================="
         )
-        if args.model == "MACEField":
-            args.loss = "universal_field"
-        else:
-            args.loss = "universal"
+        args.loss = "universal"
 
         all_ase_readable = all(
             all(check_path_ase_read(f) for f in head_config.train_file)
@@ -437,7 +497,7 @@ def run(args) -> None:
     for head_config in head_configs:
         if head_config.atomic_energies_dict is None or len(head_config.atomic_energies_dict) == 0:
             assert head_config.E0s is not None, "Atomic energies must be provided"
-            if all(check_path_ase_read(f) for f in head_config.train_file) and head_config.E0s.lower() != "foundation":
+            if all(check_path_ase_read(f) for f in head_config.train_file) and head_config.E0s.lower() not in ["foundation", "estimated"]:
                 atomic_energies_dict[head_config.head_name] = get_atomic_energies(
                     head_config.E0s, head_config.collections.train, head_config.z_table
                 )
@@ -458,6 +518,32 @@ def run(args) -> None:
                     ].item()
                     for z in z_table.zs
                 }
+            elif head_config.E0s.lower() == "estimated":
+                assert args.foundation_model is not None, "Foundation model must be provided for E0s estimation"
+                assert all(check_path_ase_read(f) for f in head_config.train_file), "E0s estimation requires training data in .xyz format"
+                logging.info("Estimating E0s from foundation model predictions on training data")
+                z_table_foundation = AtomicNumberTable(
+                    [int(z) for z in model_foundation.atomic_numbers]
+                )
+                foundation_atomic_energies = model_foundation.atomic_energies_fn.atomic_energies
+                if foundation_atomic_energies.ndim > 1:
+                    foundation_atomic_energies = foundation_atomic_energies.squeeze()
+                    if foundation_atomic_energies.ndim == 2:
+                        foundation_atomic_energies = foundation_atomic_energies[0]
+                        logging.info("Foundation model has multiple heads, using the first head for E0 estimation.")
+                foundation_e0s = {
+                    z: foundation_atomic_energies[
+                        z_table_foundation.z_to_index(z)
+                    ].item()
+                    for z in z_table_foundation.zs
+                }
+                atomic_energies_dict[head_config.head_name] = data.estimate_e0s_from_foundation(
+                    foundation_model=model_foundation,
+                    foundation_e0s=foundation_e0s,
+                    collections_train=head_config.collections.train,
+                    z_table=head_config.z_table,
+                    device=device,
+                )
             else:
                 atomic_energies_dict[head_config.head_name] = get_atomic_energies(head_config.E0s, None, head_config.z_table)
         else:
@@ -520,12 +606,29 @@ def run(args) -> None:
             args.compute_forces = True
             args.compute_virials = False
             args.compute_stress = False
-            # args.compute_polarizability = False
+            args.compute_polarizability = False
+        elif args.model == "PolarMACE" and args.loss == "energy_forces_dipole":
+            args.compute_dipole = True
+            args.compute_energy = True
+            args.compute_forces = True
+            args.compute_virials = False
+            args.compute_stress = False
+            args.compute_polarizability = False
+        elif args.model == "MACEField":
+            args.compute_energy = True
+            args.compute_dipole = False
+            if args.loss in ("universal_field", "UniversalField"):
+                args.compute_polarization = args.compute_polarization or (
+                    args.polarization_weight != 0
+                )
+                args.compute_becs = args.compute_becs or args.becs_weight != 0
+                args.compute_polarizability = args.compute_polarizability or (
+                    args.polarizability_weight != 0
+                )
         else:
             args.compute_energy = True
             args.compute_dipole = False
-            # args.compute_polarizability = False
-
+            args.compute_polarizability = False
         # atomic_energies: np.ndarray = np.array(
         #     [atomic_energies_dict[z] for z in z_table.zs]
         # )
@@ -553,7 +656,8 @@ def run(args) -> None:
                 pt_head_config=head_config,
                 r_max=args.r_max,
                 device=device,
-                batch_size=args.batch_size
+                batch_size=args.batch_size,
+                force_stress=args.pseudolabel_replay_compute_stress,
             ):
                 logging.info("Successfully applied pseudolabels to pt_head configurations")
             else:
@@ -655,7 +759,6 @@ def run(args) -> None:
     # concatenate all the trainsets
     train_set = ConcatDataset([train_sets[head] for head in heads])
     train_sampler, valid_sampler = None, None
-    valid_samplers = {}
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(
             train_set,
@@ -665,7 +768,7 @@ def run(args) -> None:
             drop_last=(not args.lbfgs),
             seed=args.seed,
         )
-    if args.distributed:
+        valid_samplers = {}
         for head, valid_set in valid_sets.items():
             valid_sampler = torch.utils.data.distributed.DistributedSampler(
                 valid_set,
@@ -708,11 +811,30 @@ def run(args) -> None:
 
     # Model
     model, output_args = configure_model(args, train_loader, atomic_energies, model_foundation, heads, z_table, head_configs)
-    model.to(device, dtype={"float32": torch.float32, "float64": torch.float64}[args.default_dtype])
+    model.to(device)
 
-    logging.debug(model)
-    logging.info(f"Total number of parameters: {tools.count_parameters(model)}")
-    logging.info("")
+    if args.lora:
+        lora_rank = args.lora_rank
+        lora_alpha = args.lora_alpha
+
+        logging.info(
+            "Injecting LoRA layers with rank=%s and alpha=%s",
+            lora_rank,
+            lora_alpha,
+        )
+
+        logging.info(
+            "Original model has %s trainable parameters.",
+            tools.count_parameters(model),
+        )
+
+        model = inject_LoRAs(model, rank=lora_rank, alpha=lora_alpha)
+
+        logging.info(
+            "Model with LoRA has %s trainable parameters.",
+            tools.count_parameters(model),
+        )
+
     logging.info("===========OPTIMIZER INFORMATION===========")
     logging.info(f"Using {args.optimizer.upper()} as parameter optimizer")
     logging.info(f"Batch size: {args.batch_size}")
@@ -733,17 +855,45 @@ def run(args) -> None:
         args.enable_oeq = False
     if args.enable_cueq and not args.only_cueq:
         logging.info("Converting model to CUEQ for accelerated training")
-        assert model.__class__.__name__ in ["MACE", "ScaleShiftMACE", "MACELES", "MACEField"]
+        assert model.__class__.__name__ in [
+            "MACE",
+            "ScaleShiftMACE",
+            "MACELES",
+            "PolarMACE",
+            "MagneticScaleShiftMACE",
+            "AtomicDielectricMACE",
+        ]
         model = run_e3nn_to_cueq(deepcopy(model), device=device)
     if args.enable_oeq:
         logging.info("Converting model to OEQ for accelerated training")
-        assert model.__class__.__name__ in ["MACE", "ScaleShiftMACE", "MACELES", "MACEField"]
+        assert model.__class__.__name__ in [
+            "MACE",
+            "ScaleShiftMACE",
+            "MACELES",
+            "PolarMACE",
+            "MagneticScaleShiftMACE",
+        ]
         model = run_e3nn_to_oeq(deepcopy(model), device=device)
 
     # Optimizer
+    if (
+        hasattr(model, "onebody_magmombasis_coeffs")
+        and not args.train_one_body_contribution
+    ):
+        model.onebody_magmombasis_coeffs.requires_grad_(False)
     param_options = get_params_options(args, model)
+
     optimizer: torch.optim.Optimizer
     optimizer = get_optimizer(args, param_options)
+    logging.info("=== Layer's learning rates ===")
+    for name, p in model.named_parameters():
+        st = optimizer.state.get(p, {})
+        if st:
+            logging.info(f"Param: {name}: {list(st.keys())}")
+
+    for i, param_group in enumerate(optimizer.param_groups):
+        logging.info(f"Param group {i}: lr = {param_group['lr']}")
+
     if args.device == "xpu":
         logging.info("Optimzing model and optimzier for XPU")
         model, optimizer = ipex.optimize(model, optimizer=optimizer)
@@ -790,9 +940,6 @@ def run(args) -> None:
     ema: Optional[ExponentialMovingAverage] = None
     if args.ema:
         ema = ExponentialMovingAverage(model.parameters(), decay=args.ema_decay)
-    else:
-        for group in optimizer.param_groups:
-            group["lr"] = args.lr
 
     if args.lbfgs:
         logging.info("Switching optimizer to LBFGS")
@@ -812,7 +959,12 @@ def run(args) -> None:
     if args.wandb:
         setup_wandb(args)
     if args.distributed:
-        distributed_model = DDP(model, device_ids=[local_rank])
+        # device_ids is only valid for single-device accelerator modules;
+        # CPU (gloo) requires device_ids=None. xpu counts as an accelerator:
+        # narrowing this to cuda alone silently gave XPU runs a CPU-style DDP.
+        distributed_model = DDP(
+            model, device_ids=[local_rank] if args.device in ("cuda", "xpu") else None
+        )
     else:
         distributed_model = None
 
@@ -884,6 +1036,7 @@ def run(args) -> None:
         plotter=plotter,
         train_sampler=train_sampler,
         rank=rank,
+        data_aug_magmom=args.data_aug_magmom,
     )
 
     logging.info("")
@@ -912,26 +1065,31 @@ def run(args) -> None:
     for head_config in head_configs:
         if all(check_path_ase_read(f) for f in head_config.train_file):
             for name, subset in head_config.collections.tests:
-                test_sets[name] = [
+                test_sets[head_config.head_name + "_" + name] = [
                     data.AtomicData.from_config(
                         config, z_table=z_table, cutoff=args.r_max, heads=heads
                     )
                     for config in subset
                 ]
         if head_config.test_dir is not None:
+            # Same head-prefixed key as the ASE branch above: two heads whose
+            # test files share a basename would otherwise overwrite each other,
+            # and visualise_train looks the sets up by that prefix.
             if not args.multi_processed_test:
                 test_files = get_files_with_suffix(head_config.test_dir, "_test.h5")
                 for test_file in test_files:
                     name = os.path.splitext(os.path.basename(test_file))[0]
-                    test_sets[name] = data.HDF5Dataset(
+                    test_sets[head_config.head_name + "_" + name] = data.HDF5Dataset(
                         test_file, r_max=args.r_max, z_table=z_table, heads=heads, head=head_config.head_name
                     )
             else:
                 test_folders = glob(head_config.test_dir + "/*")
                 for folder in test_folders:
-                    name = os.path.splitext(os.path.basename(test_file))[0]
-                    test_sets[name] = data.dataset_from_sharded_hdf5(
-                        folder, r_max=args.r_max, z_table=z_table, heads=heads, head=head_config.head_name
+                    name = os.path.splitext(os.path.basename(folder))[0]
+                    test_sets[head_config.head_name + "_" + name] = (
+                        data.dataset_from_sharded_hdf5(
+                            folder, r_max=args.r_max, z_table=z_table, heads=heads, head=head_config.head_name
+                        )
                     )
         for test_name, test_set in test_sets.items():
             test_sampler = None
@@ -972,7 +1130,9 @@ def run(args) -> None:
             # after param.requires_grad = False was called before evaluating stage-one model
             for param in model.parameters():
                 param.requires_grad = True
-            distributed_model = DDP(model, device_ids=[local_rank])
+            distributed_model = DDP(
+                model, device_ids=[local_rank] if args.device in ("cuda", "xpu") else None
+            )
         model_to_evaluate = model if not args.distributed else distributed_model
         if swa_eval:
             logging.info(f"Loaded Stage two model from epoch {epoch} for evaluation")
@@ -987,6 +1147,9 @@ def run(args) -> None:
                 model_path = Path(args.checkpoints_dir) / (tag + ".model")
             logging.info(f"Saving model to {model_path}")
             model_to_save = deepcopy(model)
+            if args.lora:
+                logging.info("Merging LoRA weights into base model")
+                merge_lora_weights(model_to_save)
             if args.enable_cueq and not args.only_cueq:
                 logging.info("RUNING CUEQ TO E3NN")
                 model_to_save = run_cueq_to_e3nn(deepcopy(model), device=device)

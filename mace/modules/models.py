@@ -39,6 +39,7 @@ from .utils import (
     get_outputs,
     get_symmetric_displacement,
     prepare_graph,
+    safe_double,
 )
 
 
@@ -79,6 +80,7 @@ class MACE(torch.nn.Module):
         oeq_config: Optional[Dict[str, Any]] = None,
         lammps_mliap: Optional[bool] = False,
         readout_cls: Optional[Type[NonLinearReadoutBlock]] = NonLinearReadoutBlock,
+        keep_last_layer_irreps: bool = False,
     ):
         super().__init__()
         self.register_buffer(
@@ -165,7 +167,7 @@ class MACE(torch.nn.Module):
             radial_MLP = [64, 64, 64]
         # Interactions and readout
         self.atomic_energies_fn = AtomicEnergiesBlock(atomic_energies)
-        if num_interactions == 1:
+        if num_interactions == 1 and not keep_last_layer_irreps:
             hidden_irreps_out = str(hidden_irreps[0])
         else:
             hidden_irreps_out = hidden_irreps
@@ -218,7 +220,7 @@ class MACE(torch.nn.Module):
             )
 
         for i in range(num_interactions - 1):
-            if i == num_interactions - 2:
+            if i == num_interactions - 2 and not keep_last_layer_irreps:
                 hidden_irreps_out = str(
                     hidden_irreps[0]
                 )  # Select only scalars for last layer
@@ -397,7 +399,7 @@ class MACE(torch.nn.Module):
         node_energy = torch.sum(torch.stack(node_energies_list, dim=-1), dim=-1)
         node_feats_out = torch.cat(node_feats_concat, dim=-1)
 
-        forces, virials, stress, hessian, edge_forces = get_outputs(
+        forces, virials, stress, hessian, edge_forces, _ = get_outputs(
             energy=total_energy,
             positions=positions,
             displacement=displacement,
@@ -577,9 +579,9 @@ class ScaleShiftMACE(MACE):
         inter_e = scatter_sum(node_inter_es, data["batch"], dim=-1, dim_size=num_graphs)
 
         total_energy = e0 + inter_e
-        node_energy = node_e0.clone().double() + node_inter_es.clone().double()
+        node_energy = safe_double(node_e0.clone()) + safe_double(node_inter_es.clone())
 
-        forces, virials, stress, hessian, edge_forces = get_outputs(
+        forces, virials, stress, hessian, edge_forces, _ = get_outputs(
             energy=inter_e,
             positions=positions,
             displacement=displacement,
@@ -640,8 +642,9 @@ class AtomicDipolesMACE(torch.nn.Module):
         gate: Optional[Callable],
         atomic_energies: Optional[
             None
-        ],  # Just here to make it compatible with energy models, MUST be None
+        ] = None,  # Just here to make it compatible with energy models, MUST be None
         apply_cutoff: bool = True,  # pylint: disable=unused-argument
+        use_agnostic_product: bool = False,  # pylint: disable=unused-argument
         use_reduced_cg: bool = True,  # pylint: disable=unused-argument
         use_so3: bool = False,  # pylint: disable=unused-argument
         distance_transform: str = "None",  # pylint: disable=unused-argument
@@ -650,6 +653,7 @@ class AtomicDipolesMACE(torch.nn.Module):
         cueq_config: Optional[Dict[str, Any]] = None,  # pylint: disable=unused-argument
         oeq_config: Optional[Dict[str, Any]] = None,  # pylint: disable=unused-argument
         edge_irreps: Optional[o3.Irreps] = None,  # pylint: disable=unused-argument
+        use_edge_irreps_first: bool = False,  # pylint: disable=unused-argument
     ):
         super().__init__()
         self.register_buffer(
@@ -854,8 +858,9 @@ class AtomicDielectricMACE(torch.nn.Module):
         gate: Optional[Callable],
         atomic_energies: Optional[
             None
-        ],  # Just here to make it compatible with energy models, MUST be None
+        ] = None,  # Just here to make it compatible with energy models, MUST be None
         apply_cutoff: bool = True,  # pylint: disable=unused-argument
+        use_agnostic_product: bool = False,  # pylint: disable=unused-argument
         use_reduced_cg: bool = True,  # pylint: disable=unused-argument
         use_so3: bool = False,  # pylint: disable=unused-argument
         distance_transform: str = "None",  # pylint: disable=unused-argument
@@ -864,11 +869,21 @@ class AtomicDielectricMACE(torch.nn.Module):
         cueq_config: Optional[Dict[str, Any]] = None,  # pylint: disable=unused-argument
         oeq_config: Optional[Dict[str, Any]] = None,  # pylint: disable=unused-argument
         edge_irreps: Optional[o3.Irreps] = None,  # pylint: disable=unused-argument
+        use_edge_irreps_first: bool = False,  # pylint: disable=unused-argument
         dipole_only: Optional[bool] = True,  # pylint: disable=unused-argument
         use_polarizability: Optional[bool] = True,  # pylint: disable=unused-argument
         means_stds: Optional[Dict[str, torch.Tensor]] = None,  # pylint: disable=W0613
+        use_last_readout_only: bool = False,  # pylint: disable=unused-argument
+        use_embedding_readout: bool = False,  # pylint: disable=unused-argument
+        readout_cls: Optional[Callable] = None,  # pylint: disable=unused-argument
+        pair_repulsion: bool = False,  # pylint: disable=unused-argument
+        heads: Optional[List[str]] = None,  # pylint: disable=unused-argument
+        only_dipole: bool = False,  # pylint: disable=unused-argument
+        atomic_energies_fn: Optional[Callable] = None,
+        embedding_specs: Optional[Dict[str, Any]] = None,
     ):
         super().__init__()
+        _ = atomic_energies_fn, embedding_specs
         self.register_buffer(
             "atomic_numbers", torch.tensor(atomic_numbers, dtype=torch.int64)
         )
@@ -905,11 +920,17 @@ class AtomicDielectricMACE(torch.nn.Module):
         # self.use_polarizability = use_polarizability
         # self.use_dipole = use_dipole
 
+        if heads is None:
+            heads = ["Default"]
+        self.heads = heads
+
         # Embedding
         node_attr_irreps = o3.Irreps([(num_elements, (0, 1))])
         node_feats_irreps = o3.Irreps([(hidden_irreps.count(o3.Irrep(0, 1)), (0, 1))])
         self.node_embedding = LinearNodeEmbeddingBlock(
-            irreps_in=node_attr_irreps, irreps_out=node_feats_irreps
+            irreps_in=node_attr_irreps,
+            irreps_out=node_feats_irreps,
+            cueq_config=cueq_config,
         )
         self.radial_embedding = RadialEmbeddingBlock(
             r_max=r_max,
@@ -938,6 +959,7 @@ class AtomicDielectricMACE(torch.nn.Module):
             hidden_irreps=hidden_irreps,
             avg_num_neighbors=avg_num_neighbors,
             radial_MLP=radial_MLP,
+            cueq_config=cueq_config,
         )
         self.interactions = torch.nn.ModuleList([inter])
 
@@ -953,12 +975,17 @@ class AtomicDielectricMACE(torch.nn.Module):
             correlation=correlation,
             num_elements=num_elements,
             use_sc=use_sc_first,
+            cueq_config=cueq_config,
         )
         self.products = torch.nn.ModuleList([prod])
 
         self.readouts = torch.nn.ModuleList()
         self.readouts.append(
-            LinearDipolePolarReadoutBlock(hidden_irreps, use_polarizability=True)
+            LinearDipolePolarReadoutBlock(
+                hidden_irreps,
+                use_polarizability=True,
+                cueq_config=cueq_config,
+            )
         )
 
         for i in range(num_interactions - 1):
@@ -984,6 +1011,7 @@ class AtomicDielectricMACE(torch.nn.Module):
                 hidden_irreps=hidden_irreps_out,
                 avg_num_neighbors=avg_num_neighbors,
                 radial_MLP=radial_MLP,
+                cueq_config=cueq_config,
             )
             self.interactions.append(inter)
             prod = EquivariantProductBasisBlock(
@@ -992,6 +1020,7 @@ class AtomicDielectricMACE(torch.nn.Module):
                 correlation=correlation,
                 num_elements=num_elements,
                 use_sc=True,
+                cueq_config=cueq_config,
             )
             self.products.append(prod)
             if i == num_interactions - 2:
@@ -1001,6 +1030,7 @@ class AtomicDielectricMACE(torch.nn.Module):
                         MLP_irreps,
                         gate,
                         use_polarizability=True,
+                        cueq_config=cueq_config,
                     )
                 )
                 # print("Nonlinear irrpes: ", hidden_irreps_out, MLP_irreps)
@@ -1011,6 +1041,7 @@ class AtomicDielectricMACE(torch.nn.Module):
                         hidden_irreps,
                         # use_charge=True,
                         use_polarizability=True,
+                        cueq_config=cueq_config,
                     )
                 )
 
@@ -1191,6 +1222,7 @@ class EnergyDipolesMACE(torch.nn.Module):
         cueq_config: Optional[Dict[str, Any]] = None,  # pylint: disable=unused-argument
         oeq_config: Optional[Dict[str, Any]] = None,  # pylint: disable=unused-argument
         edge_irreps: Optional[o3.Irreps] = None,  # pylint: disable=unused-argument
+        use_edge_irreps_first: bool = False,  # pylint: disable=unused-argument
     ):
         super().__init__()
         self.register_buffer(
@@ -1402,7 +1434,7 @@ class EnergyDipolesMACE(torch.nn.Module):
         )  # [n_graphs,3]
         total_dipole = total_dipole + baseline
 
-        forces, virials, stress, _, _ = get_outputs(
+        forces, virials, stress, _, _, _ = get_outputs(
             energy=total_energy,
             positions=data["positions"],
             displacement=displacement,
