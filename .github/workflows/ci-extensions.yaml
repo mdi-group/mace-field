@@ -33,6 +33,7 @@ jobs:
       magnetic: ${{ steps.filter.outputs.magnetic || 'true' }}
       torchsim: ${{ steps.filter.outputs.torchsim || 'true' }}
       schedulefree: ${{ steps.filter.outputs.schedulefree || 'true' }}
+      macefield: ${{ steps.filter.outputs.macefield || 'true' }}
       backends: ${{ steps.filter.outputs.backends || 'true' }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -51,6 +52,15 @@ jobs:
               - 'mace/modules/**'
               - 'mace/tools/**'
               - 'mace/data/**'
+            macefield:
+              - *shared
+              - 'mace/calculators/**'
+              - 'mace/cli/active_learning_md.py'
+              - 'mace/cli/eval_configs.py'
+              - 'mace/cli/fine_tuning_select.py'
+              - 'mace/cli/run_train.py'
+              - 'mace/cli/visualise_train.py'
+              - 'tests/extensions/macefield/**'
             polar:
               - *shared
               - 'mace/cli/polar_density_cube.py'
@@ -76,7 +86,26 @@ jobs:
             backends:
               - *shared
               - 'mace/cli/convert_*.py'
+              - 'tests/extensions/macefield/**'
               - 'tests/backends/**'
+
+  macefield:
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.macefield == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: ./.github/actions/setup-mace
+        with:
+          python-version: "3.10"
+          extras: dev
+      # MACE-Field has no optional runtime dependency; this is a CPU extension
+      # suite and does not download checkpoints or datasets.
+      - uses: ./.github/actions/run-tests
+        with:
+          tests: tests/extensions/macefield
+          markers: not slow
 
   polar:
     needs: changes

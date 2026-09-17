@@ -1,426 +1,403 @@
-# <span style="font-size:larger;">MACE</span>
+<p align="center">
+  <img src="macefield_logo.png" alt="MACE-Field logo" width="600">
+</p>
 
-[![GitHub release](https://img.shields.io/github/release/ACEsuit/mace.svg)](https://GitHub.com/ACEsuit/mace/releases/)
-[![Paper](https://img.shields.io/badge/Paper-NeurIPs2022-blue)](https://openreview.net/forum?id=YPpSngE-ZU)
-[![License](https://img.shields.io/badge/License-MIT%202.0-blue.svg)](https://opensource.org/licenses/mit)
-[![GitHub issues](https://img.shields.io/github/issues/ACEsuit/mace.svg)](https://GitHub.com/ACEsuit/mace/issues/)
-[![Documentation Status](https://readthedocs.org/projects/mace/badge/)](https://mace-docs.readthedocs.io/en/latest/)
-[![DOI](https://zenodo.org/badge/505964914.svg)](https://doi.org/10.5281/zenodo.14103332)
+# MACE-Field: Electric-Field-Aware MACE Models
 
-## Table of contents
+MACE-Field extends the [MACE](https://github.com/ACEsuit/mace) architecture with a
+uniform electric-field input. It learns a scalar electric enthalpy for molecules
+and periodic materials and obtains polarization, Born effective charges, and
+polarizability by differentiating that same scalar.
 
-- [MACE](#mace)
-  - [Table of contents](#table-of-contents)
-  - [About MACE](#about-mace)
-  - [Documentation](#documentation)
-  - [Installation](#installation)
-    - [pip installation](#installation-from-pypi)
-    - [pip installation from source](#installation-from-source)
-  - [Usage](#usage)
-    - [Training](#training)
-    - [Evaluation](#evaluation)
-  - [Tutorials](#tutorials)
-  - [CUDA acceleration with cuEquivariance](#cuda-acceleration-with-cuequivariance)
-  - [Weights and Biases for experiment tracking](#weights-and-biases-for-experiment-tracking)
-  - [Pretrained Foundation Models](#pretrained-foundation-models)
-    - [MACE-MP: Materials Project Force Fields](#mace-mp-materials-project-force-fields)
-      - [Example usage in ASE](#example-usage-in-ase)
-    - [MACE-OFF: Transferable Organic Force Fields](#mace-off-transferable-organic-force-fields)
-      - [Example usage in ASE](#example-usage-in-ase-1)
-    - [MACE-Polar: Electrostatics foundation models](#mace-polar-electrostatics-foundation-models)
-    - [Finetuning foundation models](#finetuning-foundation-models)
-    - [Latest recommended foundation models](#latest-recommended-foundation-models)
-  - [Caching](#caching)
-  - [Development](#development)
-  - [References](#references)
-  - [Contact](#contact)
-  - [License](#license)
+This repository contains the MACE-Field extension on top of the current MACE
+architecture. It supports training from scratch, fine-tuning MACE foundation
+models, ASE inference, and batch evaluation.
 
-## About MACE
+## What MACE-Field provides
 
-MACE provides fast and accurate machine learning interatomic potentials with higher order equivariant message passing.
+For an energy functional \(E(\mathbf{R}, \mathbf{\mathcal{E}})\), the model can
+return:
 
-This repository contains the MACE reference implementation developed by
-Ilyes Batatia, Gregor Simm, David Kovacs, and the group of Gabor Csanyi, and friends (see Contributors).
+- Polarization:
+  \( \mathbf{P} = -\frac{1}{\Omega}
+  \frac{\partial E}{\partial \mathbf{\mathcal{E}}} \)
+- Born effective charges:
+  \( Z^*_{\kappa,\alpha\beta} =
+  \frac{\partial P_\alpha}{\partial R_{\kappa,\beta}} \)
+- Polarizability/susceptibility:
+  \( \chi_{\alpha\beta} =
+  \frac{\partial P_\alpha}{\partial \mathcal{E}_\beta} \)
 
-Also available:
-
-- [MACE in JAX](https://github.com/ACEsuit/mace-jax), currently about 2x times faster at evaluation, but training is recommended in Pytorch for optimal performances.
-- [MACE layers](https://github.com/ACEsuit/mace-layer) for constructing higher order equivariant graph neural networks for arbitrary 3D point clouds.
-
-## Documentation
-
-A partial documentation is available at: https://mace-docs.readthedocs.io
+The response quantities are derivatives of one scalar model output, so the
+energy, forces, and field response remain mutually consistent. At zero field,
+the added field coupling contributes zero, allowing the MACE backbone to be
+initialized from a foundation model.
 
 ## Installation
 
-### 1. Requirements
+~~~bash
+git clone https://github.com/mdi-group/mace-field.git
+cd mace-field
+python -m pip install -e .
+~~~
 
-- Python >= 3.10
-- [PyTorch](https://pytorch.org/) >= 1.12 **(training with float64 is not supported with PyTorch 2.1 but is supported with 2.2 and later, Pytorch 2.4.1 is not supported)**
+The generic MACE installation, training, CUDA, and foundation-model guides are
+available in the [MACE documentation](https://mace-docs.readthedocs.io/).
 
-**Make sure to install PyTorch.** Please refer to the [official PyTorch installation](https://pytorch.org/get-started/locally/) for the installation instructions. Select the appropriate options for your system.
+## Architecture
 
-### Installation from PyPI
+![MACE-Field architecture](macefield_architecture.png)
 
-This is the recommended way to install MACE.
+MACE-Field is implemented as an extension of <code>ScaleShiftMACE</code> in
+<code>mace.modules.extensions</code>. The uniform electric field is represented
+as the equivariant <code>1o</code> irrep and is coupled to the latent features
+between interaction layers. The standard MACE energy readout remains the scalar
+output.
 
-```sh
-pip install --upgrade pip
-pip install mace-torch
-```
+## Data format
 
-**Note:** The homonymous package on [PyPI](https://pypi.org/project/MACE/) has nothing to do with this one.
+Training data are ASE-readable configurations, normally extended XYZ files.
+The default keys are:
 
-### Installation from source
+### Configuration-level values (<code>atoms.info</code>)
 
-```sh
-git clone https://github.com/ACEsuit/mace.git
-pip install ./mace
-```
+| Key | Shape | Units |
+| --- | --- | --- |
+| <code>REF_energy</code> | scalar | eV |
+| <code>REF_stress</code> | <code>(6,)</code> or <code>(3, 3)</code> | eV/Å³ |
+| <code>REF_virials</code> | <code>(6,)</code> or <code>(3, 3)</code> | eV |
+| <code>REF_electric_field</code> | <code>(3,)</code> | V/Å |
+| <code>REF_polarization</code> | <code>(3,)</code> | e/Å² |
+| <code>REF_polarizability</code> | <code>(3, 3)</code> or <code>(9,)</code> | e/(V·Å) |
+| <code>head</code> | string | multi-head name |
 
-## Usage
+### Per-atom arrays (<code>atoms.arrays</code>)
 
-### Training
+| Key | Shape | Units |
+| --- | --- | --- |
+| <code>REF_forces</code> | <code>(N, 3)</code> | eV/Å |
+| <code>REF_becs</code> | <code>(N, 3, 3)</code> or <code>(N, 9)</code> | e |
 
-To train a MACE model, you can use the `mace_run_train` script, which should be in the usual place that pip places binaries (or you can explicitly run `python3 <path_to_cloned_dir>/mace/cli/run_train.py`)
+Field targets are required only for the corresponding nonzero loss terms.
+Missing field values are represented internally by zeros, but they should not
+be used with a nonzero target weight. Key names can be changed with the
+<code>*_key</code> training options.
 
-```sh
+## Training from scratch
+
+Use the standard MACE training CLI with the <code>MACEField</code> model and
+<code>universal_field</code> loss:
+
+~~~bash
 mace_run_train \
-    --name="MACE_model" \
-    --train_file="train.xyz" \
-    --valid_fraction=0.05 \
-    --test_file="test.xyz" \
-    --config_type_weights='{"Default":1.0}' \
-    --E0s='{1:-13.663181292231226, 6:-1029.2809654211628, 7:-1484.1187695035828, 8:-2042.0330099956639}' \
-    --model="MACE" \
-    --hidden_irreps='128x0e + 128x1o' \
-    --r_max=5.0 \
-    --batch_size=10 \
-    --max_num_epochs=1500 \
-    --stage_two \
-    --start_stage_two=1200 \
-    --ema \
-    --ema_decay=0.99 \
-    --amsgrad \
-    --restart_latest \
-    --device=cuda \
-```
-
-To give a specific validation set, use the argument `--valid_file`. To set a larger batch size for evaluating the validation set, specify `--valid_batch_size`.
-
-To control the model's size, you need to change `--hidden_irreps`. For most applications, the recommended default model size is `--hidden_irreps='256x0e'` (meaning 256 invariant messages) or `--hidden_irreps='128x0e + 128x1o'`. If the model is not accurate enough, you can include higher order features, e.g., `128x0e + 128x1o + 128x2e`, or increase the number of channels to `256`. It is also possible to specify the model using the     `--num_channels=128` and `--max_L=1`keys.
-
-It is usually preferred to add the isolated atoms to the training set, rather than reading in their energies through the command line like in the example above. To label them in the training set, set `config_type=IsolatedAtom` in their info fields.
-
-When training a model from scratch, if you prefer not to use or do not know the energies of the isolated atoms, you can use the option `--E0s="average"` which estimates the atomic energies using least squares regression. Note that using fitted E0s corresponds to fitting the deviations of the atomic energies from the average, rather than fitting the atomization energy (which is the case when using isolated-atom E0s), and this will most likely result in less stable potentials for molecular dynamics applications.
-
-When finetuning foundation models, you can use `--E0s="estimated"`, which estimates the atomic reference energies by solving a linear system that optimally corrects the foundation model's predictions on the training data. This approach computes E0 corrections by first running the foundation model on all training configurations, computing the prediction errors (reference energies minus predicted energies), and then solving a least-squares system to find optimal E0 corrections for each element. This is preferable in general over the 'average' option.
-
-If the keyword `--stage_two` (previously called swa) is enabled, the energy weight of the loss is increased for the last ~20% of the training epochs (from `--start_stage_two` epochs). This setting usually helps lower the energy errors.
-
-The precision can be changed using the keyword `--default_dtype`, the default is `float64` but `float32` gives a significant speed-up (usually a factor of x2 in training).
-
-The keywords `--batch_size` and `--max_num_epochs` should be adapted based on the size of the training set. The batch size should be increased when the number of training data increases, and the number of epochs should be decreased. An heuristic for initial settings, is to consider the number of gradient update constant to 200 000, which can be computed as $\text{max-num-epochs}*\frac{\text{num-configs-training}}{\text{batch-size}}$.
-
-The code can handle training set with heterogeneous labels, for example containing both bulk structures with stress and isolated molecules. In this example, to make the code ignore stress on molecules, append to your molecules configuration a `config_stress_weight = 0.0`.
-
-By default, a figure displaying the progression of loss and RMSEs during training, along with a scatter plot of the model's inferences on the train, validation, and test sets, will be generated in the results folder at the end of training. This can be disabled using `--plot False`. To track these metrics throughout training (excluding inference on the test set), you can enable periodic plotting for the train and validation sets by specifying `--plot_frequency N`, which updates the plots every Nth epoch.
-
-#### Apple Silicon GPU acceleration
-
-To use Apple Silicon GPU acceleration make sure to install the latest PyTorch version and specify `--device=mps`.
-
-#### Multi-GPU training
-
-For multi-GPU training, use the `--distributed` flag. This will use PyTorch's DistributedDataParallel module to train the model on multiple GPUs. Combine with on-line data loading for large datasets (see below). An example slurm script can be found in `mace/scripts/distributed_example.sbatch`.
-
-#### YAML configuration
-
-Option to parse all or some arguments using a YAML is available. For example, to train a model using the arguments above, you can create a YAML file `your_configs.yaml` with the following content:
-
-```yaml
-name: nacl
-seed: 2024
-train_file: train.xyz
-stage_two: yes
-start_stage_two: 1200
-max_num_epochs: 1500
-device: cpu
-test_file: test.xyz
-E0s:
-  41: -1029.2809654211628
-  38: -1484.1187695035828
-  8: -2042.0330099956639
-config_type_weights:
-  Default: 1.0
-
-```
-
-And append to the command line `--config="your_configs.yaml"`. Any argument specified in the command line will overwrite the one in the YAML file.
-
-### Evaluation
-
-To evaluate your MACE model on an XYZ file, run the `mace_eval_configs`:
-
-```sh
-mace_eval_configs \
-    --configs="your_configs.xyz" \
-    --model="your_model.model" \
-    --output="./your_output.xyz"
-```
-
-## Tutorials
-
-You can run our [Colab tutorial](https://colab.research.google.com/drive/1D6EtMUjQPey_GkuxUAbPgld6_9ibIa-V?authuser=1#scrollTo=Z10787RE1N8T) to quickly get started with MACE.
-
-We also have a more detailed Colab tutorials on:
-
-- [Introduction to MACE training and evaluation](https://colab.research.google.com/drive/1ZrTuTvavXiCxTFyjBV4GqlARxgFwYAtX)
-- [Introduction to MACE active learning and fine-tuning](https://colab.research.google.com/drive/1oCSVfMhWrqHTeHbKgUSQN9hTKxLzoNyb)
-- [MACE theory and code (advanced)](https://colab.research.google.com/drive/1AlfjQETV_jZ0JQnV5M3FGwAM2SGCl2aU)
-
-## CUDA acceleration with cuEquivariance
-
-MACE supports CUDA acceleration with the cuEquivariance library. To install the library and use the acceleration, see our documentation at https://mace-docs.readthedocs.io/en/latest/guide/cuda_acceleration.html.
-
-## On-line data loading for large datasets
-
-If you have a large dataset that might not fit into the GPU memory it is recommended to preprocess the data on a CPU and use on-line dataloading for training the model. To preprocess your dataset specified as an xyz file run the `preprocess_data.py` script. An example is given here:
-
-```sh
-mkdir processed_data
-python ./mace/scripts/preprocess_data.py \
-    --train_file="/path/to/train_large.xyz" \
-    --valid_fraction=0.05 \
-    --test_file="/path/to/test_large.xyz" \
-    --atomic_numbers="[1, 6, 7, 8, 9, 15, 16, 17, 35, 53]" \
-    --r_max=4.5 \
-    --h5_prefix="processed_data/" \
-    --compute_statistics \
-    --E0s="average" \
-    --seed=123 \
-```
-
-To see all options and a little description of them run `python ./mace/scripts/preprocess_data.py --help` . The script will create a number of HDF5 files in the `processed_data` folder which can be used for training. There will be one folder for training, one for validation and a separate one for each `config_type` in the test set. To train the model use the `run_train.py` script as follows:
-
-```sh
-python ./mace/scripts/run_train.py \
-    --name="MACE_on_big_data" \
-    --num_workers=16 \
-    --train_file="./processed_data/train.h5" \
-    --valid_file="./processed_data/valid.h5" \
-    --test_dir="./processed_data" \
-    --statistics_file="./processed_data/statistics.json" \
-    --model="ScaleShiftMACE" \
-    --num_interactions=2 \
-    --num_channels=128 \
-    --max_L=1 \
-    --correlation=3 \
-    --batch_size=32 \
-    --valid_batch_size=32 \
-    --max_num_epochs=100 \
-    --stage_two \
-    --start_stage_two=60 \
-    --ema \
-    --ema_decay=0.99 \
-    --amsgrad \
-    --error_table='PerAtomMAE' \
-    --device=cuda \
-    --seed=123 \
-```
-
-## Weights and Biases for experiment tracking
-
-If you would like to use MACE with Weights and Biases to log your experiments simply install with
-
-```sh
-pip install ./mace[wandb]
-```
-
-And specify the necessary keyword arguments (`--wandb`, `--wandb_project`, `--wandb_entity`, `--wandb_name`, `--wandb_log_hypers`)
-
-## Pretrained Foundation Models
-
-We provide a series of pretrained foundation models for various applications. These models can be used directly for inference, or as a starting point for fine-tuning on a new dataset.
-Foundation models are a rapidly evolving field. Please look at the [MACE-MP GitHub repository](https://github.com/ACEsuit/mace-foundations/releases) and the [MACE-OFF23 GitHub repository](https://github.com/ACEsuit/mace-off/releases) for the latest releases.
-
-### Latest Recommended Foundation Models
-
-| Model Name           | Elements Covered | Training Dataset | Level of Theory     | Target System     | Model Size                                                                                                                                                                                                                                                                                                                                                                        | GitHub Release | Notes                                                              | License |
-| -------------------- | ---------------- | ---------------- | ------------------- | ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------- | ------------------------------------------------------------------ | ------- |
-| MACE-MP-0a           | 89               | MPTrj            | DFT (PBE+U)         | Materials         | [small](https://github.com/ACEsuit/mace-foundations/releases/download/mace_mp_0/2023-12-10-mace-128-L0_energy_epoch-249.model), [medium](https://github.com/ACEsuit/mace-foundations/releases/download/mace_mp_0/2023-12-03-mace-128-L1_epoch-199.model), [large](https://github.com/ACEsuit/mace-foundations/releases/download/mace_mp_0/2024-01-07-mace-128-L2_epoch-199.model) | >=v0.3.6       | Initial release of foundation model.                               | MIT     |
-| MACE-MP-0b3          | 89               | MPTrj            | DFT (PBE+U)         | Materials         | [medium](https://github.com/ACEsuit/mace-foundations/releases/download/mace_mp_0b3/mace-mp-0b3-medium.model)                                                                                                                                                                                                                                                                      | >=v0.3.10      | Improved high pressure stability and reference energies.           | MIT     |
-| MACE-MPA-0           | 89               | MPTrj + sAlex    | DFT (PBE+U)         | Materials         | [medium-mpa-0](https://github.com/ACEsuit/mace-foundations/releases/download/mace_mpa_0/mace-mpa-0-medium.model)                                                                                                                                                                                                                                                                  | >=v0.3.10      | Improved accuracy for materials, improved high pressure stability. | MIT     |
-| MACE-OMAT-0          | 89               | OMAT             | DFT (PBE+U) VASP 54 | Materials         | [medium-omat-0](https://github.com/ACEsuit/mace-foundations/releases/download/mace_omat_0/mace-omat-0-medium.model)                                                                                                                                                                                                                                                               | >=v0.3.10      |                                                                    | ASL     |
-| MACE-OFF23           | 10               | SPICE v1         | DFT (wB97M+D3)      | Organic Chemistry | [small](https://github.com/ACEsuit/mace-off/blob/main/mace_off23/MACE-OFF23_small.model), [medium](https://github.com/ACEsuit/mace-off/blob/main/mace_off23/MACE-OFF23_medium.model), [large](https://github.com/ACEsuit/mace-off/blob/main/mace_off23/MACE-OFF23_large.model)                                                                                                    | >=v0.3.6       | Initial release covering neutral organic chemistry.                | ASL     |
-| MACE-MATPES-PBE-0    | 89               | MATPES-PBE       | DFT (PBE)           | Materials         | [medium](https://github.com/ACEsuit/mace-foundations/releases/download/mace_matpes_0/MACE-matpes-pbe-omat-ft.model)                                                                                                                                                                                                                                                               | >=v0.3.10      | No +U correction.                                                  | ASL     |
-| MACE-MATPES-r2SCAN-0 | 89               | MATPES-r2SCAN    | DFT (r2SCAN)        | Materials         | [medium](https://github.com/ACEsuit/mace-foundations/releases/download/mace_matpes_0/MACE-matpes-r2scan-omat-ft.model)                                                                                                                                                                                                                                                            | >=v0.3.10      | Better functional for materials.                                   | ASL     |
-| MACE-OMOL-0 | 89               | OMOL    | DFT (wB97M-VV10)        | Molecules/Transition metals/Cations         | [large](https://github.com/ACEsuit/mace-foundations/releases/download/mace_omol_0/MACE-omol-0-extra-large-1024.model)                                                                                                                                                                                                                                                           | >=v0.3.14      | Charge/Spin embedding, very good molecular accuracy.                                   | ASL     |
-| MACE-MH-0/1 | 89               | OMAT/OMOL/OC20/MATPES    | DFT (PBE/R2SCAN/wB97M-VV10)        | Inorganic crystals, molecules and surfaces. [More info.](https://huggingface.co/mace-foundations/mace-mh-1)         | [mh-0](https://github.com/ACEsuit/mace-foundations/releases/download/mace_mh_1/mace-mh-0.model) [mh-1](https://github.com/ACEsuit/mace-foundations/releases/download/mace_mh_1/mace-mh-1.model)                                                                                                                                                                                                                                                           | >=v0.3.14      | Very good cross domain performance on surfaces/bulk/molecules.   | ASL     |
-
-
-### MACE-MP: Materials Project Force Fields
-
-We have collaborated with the Materials Project (MP) to train a universal MACE potential covering 89 elements on 1.6 M bulk crystals in the [MPTrj dataset](https://figshare.com/articles/dataset/23713842) selected from MP relaxation trajectories.
-The models are releaed on GitHub at https://github.com/ACEsuit/mace-foundations.
-If you use them please cite [our paper](https://arxiv.org/abs/2401.00096) which also contains an large range of example applications and benchmarks.
-
-> [!CAUTION]
-> The MACE-MP models are trained on MPTrj raw DFT energies from VASP outputs, and are not directly comparable to the MP's DFT energies or CHGNet's energies, which have been applied MP2020Compatibility corrections for some transition metal oxides, fluorides (GGA/GGA+U mixing corrections), and 14 anions species (anion corrections). For more details, please refer to the [MP Documentation](https://docs.materialsproject.org/methodology/materials-methodology/thermodynamic-stability/thermodynamic-stability/anion-and-gga-gga+u-mixing) and [MP2020Compatibility.yaml](https://github.com/materialsproject/pymatgen/blob/master/pymatgen/entries/MP2020Compatibility.yaml).
-
-#### Example usage in ASE
-
-```py
-from mace.calculators import mace_mp
-from ase import build
-
-atoms = build.molecule('H2O')
-calc = mace_mp(model="medium", dispersion=False, default_dtype="float32", device='cuda')
-atoms.calc = calc
-print(atoms.get_potential_energy())
-```
-
-### MACE-OFF: Transferable Organic Force Fields
-
-There is a series (small, medium, large) transferable organic force fields. These can be used for the simulation of organic molecules, crystals and molecular liquids, or as a starting point for fine-tuning on a new dataset. The models are released under the [ASL license](https://github.com/gabor1/ASL).
-The models are releaed on GitHub at https://github.com/ACEsuit/mace-off.
-If you use them please cite [our paper](https://arxiv.org/abs/2312.15211) which also contains detailed benchmarks and example applications.
-
-#### Example usage in ASE
-
-```py
-from mace.calculators import mace_off
-from ase import build
-
-atoms = build.molecule('H2O')
-calc = mace_off(model="medium", device='cuda')
-atoms.calc = calc
-print(atoms.get_potential_energy())
-```
-
-### MACE-Polar: Electrostatics foundation models
-
-PolarMACE checkpoints are electrostatics foundation models for molecular chemistry, trained on the OMol25 dataset.
-For usage, outputs, and training/finetuning details, see the PolarMACE guide:
-
-- https://mace-docs.readthedocs.io/en/latest/guide/polar_mace.html
-
-### Finetuning foundation models
-
-To finetune one of the mace-mp-0 foundation model, you can use the `mace_run_train` script with the extra argument `--foundation_model=model_type`. For example to finetune the small model on a new dataset, you can use:
-
-```sh
-mace_run_train \
-  --name="MACE" \
-  --foundation_model="small" \
-  --train_file="train.xyz" \
-  --valid_fraction=0.05 \
-  --test_file="test.xyz" \
+  --name=MACEField_model \
+  --model=MACEField \
+  --loss=universal_field \
+  --train_file=data/field_train.xyz \
+  --valid_fraction=0.2 \
+  --r_max=5.0 \
+  --num_interactions=2 \
+  --num_channels=128 \
+  --max_L=1 \
+  --compute_forces=True \
+  --compute_stress=True \
+  --compute_polarization=True \
+  --compute_becs=True \
+  --compute_polarizability=True \
   --energy_weight=1.0 \
-  --forces_weight=1.0 \
-  --E0s="average" \
-  --lr=0.01 \
-  --scaling="rms_forces_scaling" \
-  --batch_size=2 \
-  --max_num_epochs=6 \
-  --ema \
-  --ema_decay=0.99 \
-  --amsgrad \
-  --default_dtype="float32" \
-  --device=cuda \
-  --seed=3
-```
+  --forces_weight=100.0 \
+  --stress_weight=1.0 \
+  --polarization_weight=1.0 \
+  --becs_weight=100.0 \
+  --polarizability_weight=100.0 \
+  --device=cuda
+~~~
 
-Other options are "medium" and "large", or the path to a foundation model.
-If you want to finetune another model, the model will be loaded from the path provided `--foundation_model=$path_model`, all the hypers will be extracted automatically.
+The equivalent source checkout command is:
 
-## Caching
+~~~bash
+python -m mace.cli.run_train [the same options]
+~~~
 
-By default automatically downloaded models, like mace_mp, mace_off and data for fine tuning, end up in `~/.cache/mace`. The path can be changed by using
-the environment variable XDG_CACHE_HOME. When set, the new cache path expands to $XDG_CACHE_HOME/.cache/mace
+For periodic systems, the default <code>UniversalFieldLoss</code> folds
+polarization differences using the cell lattice so that equivalent polarization
+branches do not produce artificial discontinuities.
 
-## Development
+### Replay pseudolabels
 
-This project uses [pre-commit](https://pre-commit.com/) to execute code formatting and linting on commit.
-We also use `black`, `isort`, `pylint`, and `mypy`.
-We recommend setting up your development environment by installing the `dev` packages
-into your python environment:
+<code>--pseudolabel_replay</code> generates energy and force labels from the
+foundation model, and includes stress/virial labels according to the existing
+replay options. Polarization, BEC, and polarizability pseudolabels are enabled
+with <code>--compute_polarization</code>, <code>--compute_becs</code>, and
+<code>--compute_polarizability</code>; requesting either BECs or polarizability
+also requests polarization.
 
-```bash
-pip install -e ".[dev]"
+The source checkpoint must itself be MACEField to generate field responses.
+MACE-MH-1 is a plain MACE foundation model: it can provide replay energy,
+forces, and stress, but it cannot fabricate response labels. A plain source
+therefore receives an explicit warning and remains an energy/force/stress-only
+replay source. Generated labels are assigned active property weights when the
+replayed configuration did not already have them.
+
+## Fine-tuning MACE-MH-1
+
+MACE-MH-1 is a multi-head foundation model. Download the checkpoint from the
+[MACE foundation-model release](https://github.com/ACEsuit/mace-foundations/releases/tag/mace_mh_1)
+and select the head appropriate for the target data. For example,
+<code>omat_pbe</code> is a suitable starting head for OMAT-like inorganic-material
+data.
+
+The following fine-tunes one selected MH-1 head into a one-head MACE-Field model:
+
+~~~bash
+mace_run_train \
+  --name=MACEField-MH-1-omat \
+  --foundation_model=/path/to/mace-mh-1.model \
+  --foundation_head=omat_pbe \
+  --foundation_model_elements=False \
+  --foundation_model_readout=True \
+  --multiheads_finetuning=False \
+  --model=MACEField \
+  --loss=universal_field \
+  --train_file=data/field_train.xyz \
+  --valid_file=data/field_valid.xyz \
+  --E0s=estimated \
+  --compute_forces=True \
+  --compute_stress=True \
+  --compute_polarization=True \
+  --compute_becs=True \
+  --compute_polarizability=True \
+  --device=cuda
+~~~
+
+The foundation model's interaction, radial, product, and ordinary energy-readout
+parameters are transferred when their shapes are compatible. The MACE-Field
+field-coupling parameters are then trained with the selected response targets.
+Set <code>--foundation_model_elements=True</code> when the target model must
+retain all foundation elements.
+
+For replay-based multi-head fine-tuning, set
+<code>--multiheads_finetuning=True</code>, provide <code>--pt_train_file</code>,
+and define the new head(s) with <code>--heads</code>. The pretrained head is
+selected with <code>--foundation_head</code>. MACEField keeps the
+<code>universal_field</code> loss in this mode and enables field outputs for
+nonzero field-loss weights.
+
+## Inference
+
+### ASE calculator
+
+~~~python
+from mace.calculators import MACECalculator
+
+calc = MACECalculator(
+    model_paths=["MACEField.model"],
+    model_type="MACEField",
+    electric_field=[0.0, 0.0, 0.02],  # V/Å; overrides atoms.info
+    device="cuda",
+)
+
+atoms.calc = calc
+energy = atoms.get_potential_energy()
+polarization = calc.results["polarization"]       # (3,)
+becs = calc.results["becs"]                       # (N, 9)
+polarizability = calc.results["polarizability"]   # (9,)
+~~~
+
+If <code>electric_field</code> is not supplied to the calculator, the field is
+read from <code>atoms.info["electric_field"]</code>, then
+<code>atoms.info["REF_electric_field"]</code>. If neither is present, a zero
+field is used. For a MACEField calculator, unspecified response-selection
+flags retain the historical default of computing polarization, BECs, and
+polarizability. To select a subset, pass for example
+<code>compute_polarization=True, compute_becs=False,
+compute_polarizability=False</code>; BECs or polarizability always imply
+polarization.
+
+### Batch evaluation
+
+~~~bash
+mace_eval_configs \
+  --configs=input.xyz \
+  --model=MACEField.model \
+  --output=output.xyz \
+  --compute_polarization \
+  --compute_becs \
+  --compute_polarizability
+~~~
+
+Use <code>--electric-field Ex Ey Ez</code> to apply one field to every
+configuration, regardless of the per-configuration field stored in the input
+file. The output values are written with the <code>MACE_</code> prefix by default:
+
+- <code>atoms.info["MACE_polarization"]</code>
+- <code>atoms.arrays["MACE_becs"]</code>
+- <code>atoms.info["MACE_polarizability"]</code>
+
+### Finite-field ASE workflows
+
+~~~python
+atoms.info["REF_electric_field"] = [0.0, 0.0, 0.1]
+atoms.calc = MACECalculator(
+    model_paths=["MACEField.model"],
+    model_type="MACEField",
+    device="cuda",
+)
+
+# A time-dependent field can be assigned before each calculation.
+atoms.calc.electric_field = [0.0, 0.0, Ez_t]
+~~~
+
+This supports finite-field relaxation, molecular dynamics, dielectric-response
+curves, and ferroelectric switching workflows. The current documented
+field-aware path is the ASE calculator; the former environment-variable example
+is not consumed by the current MLIAP wrapper.
+
+### Fine-tuning selection and active-learning MD
+
+Descriptor-based selection accepts the same field model controls:
+
+~~~bash
+mace_finetuning_select \
+  --configs_pt=pretraining.xyz \
+  --configs_ft=field_train.xyz \
+  --model=MACEField.model \
+  --model_type=MACEField \
+  --electric-field 0 0 0.02 \
+  --output=selected.xyz
+~~~
+
+For committee active-learning MD, use the field controls and opt in to saving
+the response tensors:
+
+~~~bash
+mace_active_learning_md \
+  --config=initial.xyz \
+  --model='MACEField_*.model' \
+  --model_type=MACEField \
+  --electric-field 0 0 0.02 \
+  --save_field_responses \
+  --output=trajectory.xyz
+~~~
+
+Saved response names are <code>MACE_polarization</code> and
+<code>MACE_polarizability</code> in <code>atoms.info</code>, and
+<code>MACE_becs</code> in <code>atoms.arrays</code>. The active-learning script
+uses all three response outputs when saving is enabled and no individual
+response flag was selected.
+
+### HDF5 and training visualisation
+
+<code>mace_prepare_data</code> preserves the field, response, and response-weight
+tensors in the repository HDF5 format. The public HDF5 writer also accepts
+<code>AtomicData</code> objects directly, and its output can be read back by
+<code>HDF5Dataset</code>. Select <code>--error_table=PerAtomFieldRMSE</code> to
+include weighted polarization, BEC, and polarizability metrics in the training
+table and scatter plots.
+
+### LAMMPS export
+
+Both supported export formats accept a constant field:
+
+~~~bash
+mace_create_lammps_model MACEField.model \
+  --format=libtorch --electric-field 0 0 0.02
+mace_create_lammps_model MACEField.model \
+  --format=mliap --electric-field 0 0 0.02
+~~~
+
+The LAMMPS wrappers inject a zero field by default and store the configured
+field in the exported wrapper. Dynamic per-step field transport is not
+supported by this interface; use the ASE calculator when the field changes
+between steps.
+
+<code>mace_polar_density_cube</code> is specific to PolarMACE electrostatic
+density outputs and is not a MACEField response interface.
+
+## Development and tests
+
+Install development dependencies and enable the repository hooks:
+
+~~~bash
+python -m pip install -e '.[dev]'
 pre-commit install
-```
+~~~
 
-The second line will initialise `pre-commit` to automaticaly run code checks on commit.
-We have CI set up to check this, but we _highly_ recommend that you run those commands
-before you commit (and push) to avoid accidentally committing bad code.
+The test suite is organized by capability:
 
-### Running the tests
+| Directory | Contents |
+| --- | --- |
+| <code>tests/unit</code> | Fast CPU-only unit tests |
+| <code>tests/workflows</code> | End-to-end CLI training workflows |
+| <code>tests/extensions/macefield</code> | MACE-Field extension and foundation fine-tuning |
+| <code>tests/extensions/&lt;name&gt;</code> | Other optional MACE extensions |
+| <code>tests/foundations</code> | Network-enabled foundation-model tests |
+| <code>tests/integrations</code> | External-runtime integration tests |
 
-The test suite is organised by what each test needs to run:
+Run the MACE-Field suite locally with:
 
-| Directory | Contents | Extra requirements |
-|---|---|---|
-| `tests/unit` | fast, CPU-only unit tests | — |
-| `tests/workflows` | end-to-end CLI trainings (subprocess) | — |
-| `tests/backends` | e3nn ↔ cueq/oeq parity and converters | `cueq` / `oeq` extras (GPU for execution) |
-| `tests/extensions/<x>` | polar / les / torchsim / schedulefree | the extension's dependency |
-| `tests/foundations` | foundation-model loaders (downloads) | network, opt-in |
-| `tests/integrations/<x>` | LAMMPS (and future integrations) | see `tests/integrations/README.md` |
-| `tests/benchmarks` | performance measurements | GPU |
+~~~bash
+python -m pytest tests/extensions/macefield
+~~~
 
-Capabilities a test needs (a GPU, an optional package, network access) are
-pytest markers enforced by `tests/conftest.py`: locally, tests whose
-requirements are missing are skipped; CI jobs export `MACE_REQUIRE_CAPS` to
-turn those skips into failures. Network downloads are opt-in via
-`MACE_CI_ALLOW_NETWORK=1`.
+Run the core CPU suites with:
 
-```bash
-pytest tests/unit                             # quick check
-pytest tests -m "not slow and not network"    # smoke over everything runnable
-```
+~~~bash
+python -m pytest tests/unit -m "not slow"
+python -m pytest tests/workflows
+~~~
 
-Every CI test job runs through the `.github/actions/run-tests` composite
-action, whose inputs (`tests`, `markers`, `require-caps`, `allow-network`,
-`splits`, `coverage`, ...) map 1:1 to pytest flags — to reproduce a job
-locally, read its `with:` block in the workflow and run the equivalent pytest
-command (e.g. the unit job is `pytest tests/unit -m "not slow" -n auto`).
-
-We are happy to accept pull requests under an [MIT license](https://choosealicense.com/licenses/mit/). Please copy/paste the license text as a comment into your pull request.
+CI runs the MACE-Field suite as a dedicated CPU extension job. The suite uses
+small synthetic models and does not require network access or a foundation
+checkpoint download.
 
 ## References
 
-If you use this code, please cite our papers:
+If you use MACE-Field, please cite:
 
-```bibtex
+~~~bibtex
+@misc{martin2025generallearningelectricresponse,
+  title={General Learning of the Electric Response of Inorganic Materials},
+  author={Martin, Bradley A. A. and Ganose, Alex M. and Kapil, Venkat and
+           Li, Tingwei and Butler, Keith T.},
+  year={2025},
+  eprint={2508.17870},
+  archivePrefix={arXiv},
+  primaryClass={cond-mat.mtrl-sci}
+}
+~~~
+
+and the main MACE papers:
+
+~~~bibtex
 @inproceedings{Batatia2022mace,
-  title={{MACE}: Higher Order Equivariant Message Passing Neural Networks for Fast and Accurate Force Fields},
-  author={Ilyes Batatia and David Peter Kovacs and Gregor N. C. Simm and Christoph Ortner and Gabor Csanyi},
+  title={{MACE}: Higher Order Equivariant Message Passing Neural Networks
+         for Fast and Accurate Force Fields},
+  author={Batatia, Ilyes and Kovacs, David Peter and Simm, Gregor N. C. and
+          Ortner, Christoph and Csanyi, Gabor},
   booktitle={Advances in Neural Information Processing Systems},
-  editor={Alice H. Oh and Alekh Agarwal and Danielle Belgrave and Kyunghyun Cho},
-  year={2022},
-  url={https://openreview.net/forum?id=YPpSngE-ZU}
+  year={2022}
 }
 
 @misc{Batatia2022Design,
-  title = {The Design Space of E(3)-Equivariant Atom-Centered Interatomic Potentials},
-  author = {Batatia, Ilyes and Batzner, Simon and Kov{\'a}cs, D{\'a}vid P{\'e}ter and Musaelian, Albert and Simm, Gregor N. C. and Drautz, Ralf and Ortner, Christoph and Kozinsky, Boris and Cs{\'a}nyi, G{\'a}bor},
-  year = {2022},
-  number = {arXiv:2205.06643},
-  eprint = {2205.06643},
-  eprinttype = {arxiv},
-  doi = {10.48550/arXiv.2205.06643},
-  archiveprefix = {arXiv}
- }
-```
+  title={The Design Space of E(3)-Equivariant Atom-Centered Interatomic
+         Potentials},
+  author={Batatia, Ilyes and Batzner, Simon and Kovacs, David Peter and
+          Musaelian, Albert and Simm, Gregor N. C. and Drautz, Ralf and
+          Ortner, Christoph and Kozinsky, Boris and Csanyi, Gabor},
+  year={2022},
+  eprint={2205.06643},
+  archivePrefix={arXiv}
+}
+~~~
+
+## Acknowledgments
+
+This work has been supported by UKRI funding (EP/Y000552/1 and EP/Y014405/1).
 
 ## Contact
 
-If you have any questions, please contact us at ilyes.batatia@ens-paris-saclay.fr.
-
-For bugs or feature requests, please use [GitHub Issues](https://github.com/ACEsuit/mace/issues).
-
-## License
-
-The MACE code is published and distributed under the [MIT License](MIT.md). (Note that some of the models linked above come with different licenses).
+- MACE-Field: bradley.martin@ucl.ac.uk
+- MACE core: ilyes.batatia@ens-paris-saclay.fr
+- Issues and feature requests:
+  https://github.com/mdi-group/mace-field/issues
