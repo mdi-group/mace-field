@@ -34,8 +34,8 @@ from .utils import (
     compute_rel_mae,
     compute_rel_rmse,
     compute_rmse,
-    fold_polarization,
     filter_nonzero_weight,
+    fold_polarization,
 )
 
 
@@ -745,8 +745,7 @@ class MACELoss(Metric):
             )
             self.delta_polarization.append(polarization_difference)
             self.delta_polarization_per_atom.append(
-                polarization_difference
-                / (batch.ptr[1:] - batch.ptr[:-1]).view(-1, 1)
+                polarization_difference / (batch.ptr[1:] - batch.ptr[:-1]).view(-1, 1)
             )
             self.polarization_computed += filter_nonzero_weight(
                 batch,
@@ -861,13 +860,9 @@ class MACELoss(Metric):
             aux["q95_mu"] = compute_q95(delta_mus)
         if self.polarization_computed:
             delta_polarization = self.convert(self.delta_polarization)
-            delta_polarization_per_atom = self.convert(
-                self.delta_polarization_per_atom
-            )
+            delta_polarization_per_atom = self.convert(self.delta_polarization_per_atom)
             aux["mae_polarization"] = compute_mae(delta_polarization)
-            aux["mae_polarization_per_atom"] = compute_mae(
-                delta_polarization_per_atom
-            )
+            aux["mae_polarization_per_atom"] = compute_mae(delta_polarization_per_atom)
             aux["rmse_polarization"] = compute_rmse(delta_polarization)
             aux["rmse_polarization_per_atom"] = compute_rmse(
                 delta_polarization_per_atom

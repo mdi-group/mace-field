@@ -583,6 +583,8 @@ def save_AtomicData_to_HDF5(data, i, h5_file) -> None:
     grp["shifts"] = data.shifts
     grp["unit_shifts"] = data.unit_shifts
     grp["cell"] = data.cell
+    if getattr(data, "pbc", None) is not None:
+        grp["pbc"] = data.pbc
     grp["node_attrs"] = data.node_attrs
     grp["weight"] = data.weight
     grp["energy_weight"] = data.energy_weight
@@ -595,7 +597,13 @@ def save_AtomicData_to_HDF5(data, i, h5_file) -> None:
     grp["virials"] = data.virials
     grp["dipole"] = data.dipole
     grp["charges"] = data.charges
+    grp["electric_field"] = data.electric_field
+    grp["polarization"] = data.polarization
+    grp["becs"] = data.becs
     grp["polarizability"] = data.polarizability
+    grp["polarization_weight"] = data.polarization_weight
+    grp["becs_weight"] = data.becs_weight
+    grp["polarizability_weight"] = data.polarizability_weight
     grp["head"] = data.head
 
 

@@ -9,17 +9,32 @@ import pytest
 import torch
 from ase import Atoms
 from e3nn import o3
+from e3nn.util import jit
 
+from mace import data
 from mace.calculators import MACECalculator
+from mace.calculators.lammps_mace import LAMMPS_MACE
+from mace.calculators.lammps_mliap_mace import MACEEdgeForcesWrapper
+from mace.cli.active_learning_md import save_config
+from mace.cli.convert_e3nn_cueq import run as run_e3nn_to_cueq
 from mace.cli.eval_configs import run as mace_eval_configs_run
 from mace.cli.run_train import run as mace_run
-from mace.modules import interaction_classes
+from mace.data import HDF5Dataset, save_dataset_as_HDF5
+from mace.modules import MACEField, interaction_classes, is_macefield_model
 from mace.modules.models import ScaleShiftMACE
+from mace.modules.utils import get_edge_vectors_and_lengths
+from mace.cli.visualise_train import model_inference
+from mace.tools.multihead_tools import (
+    HeadConfig,
+    apply_pseudolabels_to_pt_head_configs,
+    generate_pseudolabels_for_configs,
+)
+from mace.tools.scripts_utils import SubsetCollection
 from mace.tools.arg_parser import build_default_arg_parser
+from mace.tools import torch_geometric
+from mace.tools.model_script_utils import load_foundations_elements
 from mace.tools.torch_tools import default_dtype
 from mace.tools.utils import AtomicNumberTable
-from mace.tools.model_script_utils import load_foundations_elements
-
 
 # -----------------------------------------------------------------------------
 # Helpers & fixtures
@@ -36,8 +51,8 @@ def _attach_field_response(atoms, energy=0.0, field=(0.01, 0.0, 0.0), seed=0):
     virials6 = np.zeros(6, dtype=float)
 
     polarization = rng.normal(scale=0.1, size=3)
-    becs = rng.normal(scale=0.1, size=(n, 9))          # (natoms, 9) flattened 3×3
-    polarizability = rng.normal(scale=0.05, size=9)    # flattened 3×3
+    becs = rng.normal(scale=0.1, size=(n, 9))  # (natoms, 9) flattened 3×3
+    polarizability = rng.normal(scale=0.05, size=9)  # flattened 3×3
 
     atoms.info["REF_energy"] = float(energy)
     atoms.info["REF_stress"] = stress6
@@ -130,7 +145,9 @@ def _common_train_args(tmp_path: Path, xyz: Path, name: str = "MACEField-mini"):
     return args
 
 
-def _locate_trained_model(tmp_path: Path, name: str, seed: Optional[int] = None) -> Path:
+def _locate_trained_model(
+    tmp_path: Path, name: str, seed: Optional[int] = None
+) -> Path:
     """Locate a trained model file for a given run name.
 
     Handles both compiled and tagged naming schemes used by MACE.
@@ -152,7 +169,9 @@ def _locate_trained_model(tmp_path: Path, name: str, seed: Optional[int] = None)
     if fallback.exists():
         return fallback
 
-    raise FileNotFoundError(f"Could not find trained model for name={name} in {tmp_path}")
+    raise FileNotFoundError(
+        f"Could not find trained model for name={name} in {tmp_path}"
+    )
 
 
 def _make_macefield_calculator(
@@ -530,7 +549,9 @@ def test_eval_global_field_overrides_per_frame(tmp_path, field_fitting_configs):
         assert not np.allclose(P_global, P_frame)
 
 
-def test_eval_field_flags_fail_with_plain_mace(tmp_path, mace_model_path, field_fitting_configs):
+def test_eval_field_flags_fail_with_plain_mace(
+    tmp_path, mace_model_path, field_fitting_configs
+):
     """Requesting field outputs with a plain MACE model should raise."""
     xyz = tmp_path / "fit.xyz"
     ase.io.write(xyz, field_fitting_configs)
@@ -566,13 +587,26 @@ def test_eval_field_flags_fail_with_plain_mace(tmp_path, mace_model_path, field_
         mace_eval_configs_run(args)
 
 
+def test_calculator_field_flags_fail_with_plain_mace(mace_model_path):
+    """The calculator must reject response requests for plain MACE models."""
+    with pytest.raises(ValueError, match="MACEField"):
+        MACECalculator(
+            model_paths=[str(mace_model_path)],
+            device="cpu",
+            default_dtype="float32",
+            compute_polarization=True,
+        )
+
+
 # -----------------------------------------------------------------------------
 # Edge cases in data / keys
 # -----------------------------------------------------------------------------
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning")
-def test_universal_field_loss_handles_missing_keys_gracefully(tmp_path, field_fitting_configs):
+def test_universal_field_loss_handles_missing_keys_gracefully(
+    tmp_path, field_fitting_configs
+):
     """Training with universal_field should tolerate missing field keys."""
     xyz = tmp_path / "train_missing.xyz"
 
@@ -597,7 +631,9 @@ def test_zero_field_responses_do_not_crash(tmp_path):
     cfgs = []
     cell = (6.0, 6.0, 6.0)
     for i in range(3):
-        at = Atoms("OH2", positions=[(0, 0, 0), (1, 0, 0), (-0.3, 0.9, 0)], cell=cell, pbc=True)
+        at = Atoms(
+            "OH2", positions=[(0, 0, 0), (1, 0, 0), (-0.3, 0.9, 0)], cell=cell, pbc=True
+        )
         _attach_field_response(at, energy=-1.0 + 0.1 * i, field=(0.0, 0.0, 0.0), seed=i)
         at.info["REF_polarization"] = np.zeros(3)
         at.arrays["REF_becs"] = np.zeros((len(at), 9))
@@ -616,7 +652,9 @@ def test_zero_field_responses_do_not_crash(tmp_path):
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning")
-def test_calculator_respects_per_atoms_electric_field_override(tmp_path, field_fitting_configs):
+def test_calculator_respects_per_atoms_electric_field_override(
+    tmp_path, field_fitting_configs
+):
     """Check per-Atoms electric_field in info works without REF_electric_field."""
     xyz = tmp_path / "train.xyz"
     ase.io.write(xyz, field_fitting_configs)
@@ -684,9 +722,14 @@ def test_macefield_multihead_finetuning_smoke(
     # skip_tp reshape branch in load_foundations_elements (no utils changes).
     foundation_path = tmp_path / "mace_nonlin.model"
     with default_dtype(torch.float32):
+        torch.manual_seed(7)
         cfg = dict(MODEL_CONFIG)
-        cfg["interaction_cls"] = interaction_classes["RealAgnosticResidualNonLinearInteractionBlock"]
-        cfg["interaction_cls_first"] = interaction_classes["RealAgnosticResidualNonLinearInteractionBlock"]
+        cfg["interaction_cls"] = interaction_classes[
+            "RealAgnosticResidualNonLinearInteractionBlock"
+        ]
+        cfg["interaction_cls_first"] = interaction_classes[
+            "RealAgnosticResidualNonLinearInteractionBlock"
+        ]
         model = ScaleShiftMACE(**cfg)
         torch.save(model, foundation_path)
 
@@ -700,6 +743,9 @@ def test_macefield_multihead_finetuning_smoke(
 
     model_path = _locate_trained_model(tmp_path, args.name, seed=args.seed)
     assert model_path.exists()
+    assert args.loss.lower().replace("_", "") == "universalfield"
+    trained_model = torch.load(model_path, map_location="cpu", weights_only=False)
+    assert isinstance(trained_model, MACEField)
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning")
@@ -716,8 +762,12 @@ def test_macefield_multihead_calculator_heads(
     foundation_path = tmp_path / "mace_nonlin.model"
     with default_dtype(torch.float32):
         cfg = dict(MODEL_CONFIG)
-        cfg["interaction_cls"] = interaction_classes["RealAgnosticResidualNonLinearInteractionBlock"]
-        cfg["interaction_cls_first"] = interaction_classes["RealAgnosticResidualNonLinearInteractionBlock"]
+        cfg["interaction_cls"] = interaction_classes[
+            "RealAgnosticResidualNonLinearInteractionBlock"
+        ]
+        cfg["interaction_cls_first"] = interaction_classes[
+            "RealAgnosticResidualNonLinearInteractionBlock"
+        ]
         model = ScaleShiftMACE(**cfg)
         torch.save(model, foundation_path)
 
@@ -828,9 +878,7 @@ class _FakeInteraction(torch.nn.Module):
 class _FakeContraction(torch.nn.Module):
     def __init__(self, num_species, dim_in, dim_out):
         super().__init__()
-        self.weights_max = torch.nn.Parameter(
-            torch.randn(num_species, dim_in, dim_out)
-        )
+        self.weights_max = torch.nn.Parameter(torch.randn(num_species, dim_in, dim_out))
         self.weights = torch.nn.ParameterList(
             [
                 torch.nn.Parameter(torch.randn(num_species, dim_in, dim_out)),
@@ -982,7 +1030,9 @@ def test_foundations_loader_skip_tp_not_copied_when_shape_mismatch():
     """For a reduced element table, skip_tp is transferred by slicing Z and scaling (shape-consistent)."""
     # In _FakeModel: num_channels_foundation = 8
     # skip_tp is reshaped as (C, Z_found, C) => size C*Z*C
-    foundation = _FakeModel(atomic_numbers=[1, 6, 8], skip_tp_paths=8 * 3 * 8, field_paths=128)
+    foundation = _FakeModel(
+        atomic_numbers=[1, 6, 8], skip_tp_paths=8 * 3 * 8, field_paths=128
+    )
     target = _FakeModel(atomic_numbers=[1, 8], skip_tp_paths=8 * 2 * 8, field_paths=128)
 
     table = AtomicNumberTable([1, 8])
@@ -1014,7 +1064,9 @@ def test_foundations_loader_skip_tp_not_copied_when_shape_mismatch():
         )
 
         # target skip_tp must change from its original value
-        assert not torch.allclose(target.interactions[i].skip_tp.weight, original_target_skip[i])
+        assert not torch.allclose(
+            target.interactions[i].skip_tp.weight, original_target_skip[i]
+        )
         # and match the expected sliced+scaled transfer
         assert torch.allclose(target.interactions[i].skip_tp.weight, expected)
 
@@ -1125,3 +1177,331 @@ def test_foundations_loader_field_modules_not_inherited_when_flag_false():
         target.field_linear[0].bias,
         target_field_linear_b_before,
     )
+
+
+def test_macefield_pseudolabels_generate_field_outputs_and_weights():
+    """Pseudolabel inference must request and activate all field targets."""
+    atoms = Atoms("OH2", positions=[(0, 0, 0), (1, 0, 0), (0, 1, 0)])
+    atoms.set_cell([6.0, 6.0, 6.0])
+    atoms.set_pbc(True)
+    config = data.config_from_atoms(atoms, data.KeySpecification.from_defaults())
+    with default_dtype(torch.float32):
+        model = MACEField(**MODEL_CONFIG)
+        updated = generate_pseudolabels_for_configs(
+            model=model,
+            configs=[config],
+            z_table=AtomicNumberTable([1, 8]),
+            r_max=5.0,
+            device=torch.device("cpu"),
+            batch_size=1,
+            compute_polarization=True,
+            compute_becs=True,
+            compute_polarizability=True,
+        )[0]
+
+    assert updated.properties["polarization"].shape == (3,)
+    assert updated.properties["becs"].shape == (3, 3, 3)
+    assert updated.properties["polarizability"].shape == (3, 3)
+    for key in ("energy", "forces", "polarization", "becs", "polarizability"):
+        assert updated.property_weights[key] > 0
+
+
+def test_plain_mace_rejects_field_pseudolabel_request():
+    atoms = Atoms("H2", positions=[(0, 0, 0), (0, 0, 1)])
+    config = data.config_from_atoms(atoms)
+    with default_dtype(torch.float32):
+        model = ScaleShiftMACE(**MODEL_CONFIG)
+        with pytest.raises(ValueError, match="MACEField"):
+            generate_pseudolabels_for_configs(
+                model=model,
+                configs=[config],
+                z_table=AtomicNumberTable([1, 8]),
+                r_max=5.0,
+                device=torch.device("cpu"),
+                batch_size=1,
+                compute_polarization=True,
+            )
+
+
+def test_plain_foundation_replay_disables_missing_field_weights():
+    """Plain MACE replay does not turn missing response labels into zeros."""
+    atoms = Atoms(
+        "OH2",
+        positions=[(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+        cell=[6.0, 6.0, 6.0],
+        pbc=True,
+    )
+    atoms.info["REF_electric_field"] = [0.0, 0.0, 0.0]
+    config = data.config_from_atoms(atoms, data.KeySpecification.from_defaults())
+    head_config = HeadConfig(
+        head_name="pt_head",
+        key_specification=data.KeySpecification.from_defaults(),
+        collections=SubsetCollection(train=[config], valid=[], tests=[]),
+        z_table=AtomicNumberTable([1, 8]),
+    )
+    with default_dtype(torch.float32):
+        model = ScaleShiftMACE(**MODEL_CONFIG)
+        assert apply_pseudolabels_to_pt_head_configs(
+            foundation_model=model,
+            pt_head_config=head_config,
+            r_max=5.0,
+            device=torch.device("cpu"),
+            batch_size=1,
+            compute_polarization=True,
+        )
+
+    updated = head_config.collections.train[0]
+    assert updated.properties["energy"] is not None
+    assert updated.properties["forces"] is not None
+    assert updated.property_weights["energy"] > 0
+    assert updated.property_weights["forces"] > 0
+    for key in ("polarization", "becs", "polarizability"):
+        assert updated.properties[key] is None
+        assert updated.property_weights[key] == 0.0
+
+
+def test_macefield_calculator_selects_response_outputs():
+    atoms = Atoms(
+        "OH2",
+        positions=[(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+        cell=[6.0, 6.0, 6.0],
+        pbc=True,
+    )
+    with default_dtype(torch.float32):
+        model = MACEField(**MODEL_CONFIG)
+    calc = MACECalculator(
+        models=model,
+        model_type="MACEField",
+        device="cpu",
+        default_dtype="float32",
+        electric_field=[0.01, 0.0, 0.0],
+        compute_polarization=True,
+        compute_becs=False,
+        compute_polarizability=False,
+    )
+    atoms.calc = calc
+    atoms.get_potential_energy()
+    assert calc.results["polarization"].shape == (3,)
+    assert "becs" not in calc.results
+    assert "polarizability" not in calc.results
+    assert calc.get_descriptors(atoms).shape[0] == len(atoms)
+
+
+def test_macefield_capability_detection_and_calculator_inference():
+    """Wrapped field models are recognised and need no duplicate model_type."""
+    with default_dtype(torch.float32):
+        model = MACEField(**MODEL_CONFIG)
+
+    wrapper = torch.nn.Module()
+    wrapper.model = model
+    assert is_macefield_model(model)
+    assert is_macefield_model(wrapper)
+
+    atoms = Atoms(
+        "H2O",
+        positions=[(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+        cell=[6.0, 6.0, 6.0],
+        pbc=True,
+    )
+    calc = MACECalculator(models=model, device="cpu", default_dtype="float32")
+    atoms.calc = calc
+    atoms.get_potential_energy()
+    assert calc.model_type == "MACEField"
+    assert "polarization" in calc.results
+
+
+def test_macefield_atomic_data_hdf5_round_trip(tmp_path, field_fitting_configs):
+    config = data.config_from_atoms(
+        field_fitting_configs[0], data.KeySpecification.from_defaults()
+    )
+    atomic_data = data.AtomicData.from_config(
+        config,
+        z_table=AtomicNumberTable([1, 8]),
+        cutoff=5.0,
+    )
+    path = tmp_path / "field_atomic_data.h5"
+    save_dataset_as_HDF5([atomic_data], str(path))
+    loaded = HDF5Dataset(
+        str(path), z_table=AtomicNumberTable([1, 8]), r_max=5.0
+    )[0]
+
+    assert torch.allclose(loaded.electric_field, atomic_data.electric_field)
+    assert torch.allclose(loaded.polarization, atomic_data.polarization)
+    assert torch.allclose(loaded.becs, atomic_data.becs)
+    assert torch.allclose(loaded.polarizability, atomic_data.polarizability)
+    assert torch.allclose(
+        loaded.polarizability_weight, atomic_data.polarizability_weight
+    )
+
+
+def test_macefield_visualisation_reports_weighted_field_metrics(
+    field_fitting_configs,
+):
+    """The training scatter workflow includes all three field responses."""
+    config = data.config_from_atoms(
+        field_fitting_configs[0], data.KeySpecification.from_defaults()
+    )
+    with default_dtype(torch.float32):
+        model = MACEField(**MODEL_CONFIG)
+        atomic_data = data.AtomicData.from_config(
+            config,
+            z_table=AtomicNumberTable([1, 8]),
+            cutoff=5.0,
+        )
+        loader = torch_geometric.dataloader.DataLoader(
+            [atomic_data], batch_size=1, shuffle=False
+        )
+        results = model_inference(
+            {"train_Default": loader},
+            model,
+            {
+                "forces": False,
+                "virials": False,
+                "stress": False,
+                "polarization": True,
+                "becs": True,
+                "polarizability": True,
+            },
+            "cpu",
+        )
+
+    result = results["train_Default"]
+    assert {"polarization", "becs", "polarizability"} <= set(result)
+    for key in ("polarization", "becs", "polarizability"):
+        assert result[key]["reference"].shape == result[key]["predicted"].shape
+
+
+def test_active_learning_saves_field_response_outputs(tmp_path):
+    """Active-learning trajectory output uses the established response names."""
+    from ase.calculators.singlepoint import SinglePointCalculator
+
+    atoms = Atoms(
+        "OH2",
+        positions=[(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+        cell=[6.0, 6.0, 6.0],
+        pbc=True,
+    )
+    forces = np.zeros((len(atoms), 3))
+    atoms.calc = SinglePointCalculator(atoms, energy=1.0, forces=forces)
+    atoms.calc.results.update(
+        {
+            "energy_var": 0.0,
+            "forces_comm": forces[None, ...],
+            "polarization": np.array([0.1, 0.2, 0.3]),
+            "becs": np.zeros((len(atoms), 9)),
+            "polarizability": np.eye(3).reshape(9),
+        }
+    )
+
+    class _Dynamics:
+        def __init__(self, structure):
+            self.atoms = structure
+
+        @staticmethod
+        def get_time():
+            return 0.0
+
+    output = tmp_path / "field-md.xyz"
+    save_config(_Dynamics(atoms), str(output), save_field_responses=True)
+    saved = ase.io.read(output)
+    assert saved.info["MACE_polarization"].shape == (3,)
+    assert saved.arrays["MACE_becs"].shape == (len(atoms), 9)
+    assert saved.info["MACE_polarizability"].shape == (9,)
+
+
+def test_macefield_lammps_libtorch_constant_field_parity():
+    """The libtorch wrapper uses its configured field and remains scriptable."""
+    from tests.integrations.lammps._harness import lammps_style_cluster
+
+    field = torch.tensor([[0.01, -0.02, 0.03]], dtype=torch.float32)
+    with default_dtype(torch.float32):
+        model = MACEField(**MODEL_CONFIG)
+        batch, local_or_ghost, _, _ = lammps_style_cluster(model, n_repeat=1)
+        batch_dict = batch
+        direct = model(
+            batch_dict,
+            compute_force=False,
+            compute_stress=False,
+            electric_field=field,
+        )["energy"][0]
+        wrapper = LAMMPS_MACE(model, electric_field=field)
+        wrapped = wrapper(batch_dict, local_or_ghost)["total_energy_local"][0]
+        scripted = jit.compile(LAMMPS_MACE(model, electric_field=field))
+        scripted_value = scripted(batch_dict, local_or_ghost)["total_energy_local"][0]
+
+    assert torch.allclose(wrapped, direct.to(wrapped.dtype), rtol=1e-5, atol=1e-5)
+    assert torch.allclose(
+        scripted_value, direct.to(scripted_value.dtype), rtol=1e-5, atol=1e-5
+    )
+
+
+def test_macefield_lammps_mliap_wrapper_injects_constant_field():
+    """The ML-IAP wrapper supplies the same constant field to MACEField."""
+    from tests.integrations.lammps._harness import lammps_style_cluster
+
+    class _Exchange:
+        def forward_exchange(self, source, target, _width):
+            target.copy_(source)
+
+        def reverse_exchange(self, source, target, _width):
+            target.copy_(source)
+
+    field = torch.tensor([[0.01, -0.02, 0.03]], dtype=torch.float32)
+    with default_dtype(torch.float32):
+        model = MACEField(**MODEL_CONFIG)
+        batch, _, _, _ = lammps_style_cluster(model, n_repeat=1)
+        vectors, _ = get_edge_vectors_and_lengths(
+            batch["positions"], batch["edge_index"], batch["shifts"]
+        )
+        mliap_data = {
+            "vectors": vectors,
+            "node_attrs": batch["node_attrs"],
+            "edge_index": batch["edge_index"],
+            "batch": batch["batch"],
+            "natoms": (len(batch["positions"]), 0),
+            "lammps_class": _Exchange(),
+        }
+        wrapper = MACEEdgeForcesWrapper(model, electric_field=field)
+        energy, node_energy, pair_forces = wrapper(mliap_data)
+
+    assert torch.isfinite(energy)
+    assert node_energy.shape == (len(batch["positions"]),)
+    assert pair_forces.shape == vectors.shape
+
+
+@pytest.mark.cueq
+def test_macefield_cueq_preserves_field_responses():
+    """CuEq conversion preserves energy and all field response tensors."""
+    with default_dtype(torch.float64):
+        model = MACEField(**MODEL_CONFIG)
+        config = data.Configuration(
+            atomic_numbers=np.array([8, 1, 1]),
+            positions=np.array(
+                [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]
+            ),
+            cell=np.diag([6.0, 6.0, 6.0]),
+            pbc=(True, True, True),
+            properties={"electric_field": np.array([0.01, 0.02, 0.03])},
+            property_weights={},
+        )
+        atomic_data = data.AtomicData.from_config(
+            config, z_table=AtomicNumberTable([1, 8]), cutoff=5.0
+        )
+        batch = next(
+            iter(torch_geometric.dataloader.DataLoader([atomic_data], batch_size=1))
+        )
+        kwargs = dict(
+            training=False,
+            compute_force=False,
+            compute_stress=False,
+            compute_polarization=True,
+            compute_becs=True,
+            compute_polarizability=True,
+            electric_field=torch.tensor([0.01, 0.02, 0.03]),
+        )
+        reference = model(batch.to_dict(), **kwargs)
+        converted = run_e3nn_to_cueq(model, device="cpu")
+        accelerated = converted(batch.to_dict(), **kwargs)
+
+    for key in ("energy", "polarization", "becs", "polarizability"):
+        assert torch.allclose(reference[key], accelerated[key], rtol=1e-5, atol=1e-8)

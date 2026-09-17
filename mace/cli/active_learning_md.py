@@ -66,6 +66,47 @@ def parse_args() -> argparse.Namespace:
         default=False,
     )
     parser.add_argument(
+        "--model_type",
+        help="model type passed to MACECalculator",
+        type=str,
+        default="MACE",
+    )
+    parser.add_argument(
+        "--head", help="model head used for multi-head models", default=None
+    )
+    parser.add_argument(
+        "--electric-field",
+        help="constant electric field components in V/A for MACEField",
+        type=float,
+        nargs=3,
+        metavar=("Ex", "Ey", "Ez"),
+        default=None,
+    )
+    parser.add_argument(
+        "--compute_polarization",
+        help="compute MACEField polarization",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--compute_becs",
+        help="compute MACEField Born effective charges",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--compute_polarizability",
+        help="compute MACEField polarizability",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
+        "--save_field_responses",
+        help="save requested MACEField responses in the trajectory",
+        action="store_true",
+        default=False,
+    )
+    parser.add_argument(
         "--info_prefix",
         help="prefix for energy, forces and stress keys",
         type=str,
@@ -101,7 +142,7 @@ def printenergy(dyn, start_time=None):  # store a reference to atoms in the defi
     )
 
 
-def save_config(dyn, fname):
+def save_config(dyn, fname, save_field_responses=False, info_prefix="MACE_"):
     atomsi = dyn.atoms
     ens = atomsi.get_potential_energy()
     frcs = atomsi.get_forces()
@@ -119,6 +160,14 @@ def save_config(dyn, fname):
             "mlff_forces_var": np.var(atomsi.calc.results["forces_comm"], axis=0),
         }
     )
+    if save_field_responses:
+        results = atomsi.calc.results
+        if "polarization" in results:
+            atomsi.info[f"{info_prefix}polarization"] = results["polarization"]
+        if "becs" in results:
+            atomsi.arrays[f"{info_prefix}becs"] = results["becs"]
+        if "polarizability" in results:
+            atomsi.info[f"{info_prefix}polarizability"] = results["polarizability"]
 
     ase.io.write(fname, atomsi, append=True)
 
@@ -150,10 +199,29 @@ def run(args: argparse.Namespace) -> None:
     atoms_fname = args.config
     atoms_index = args.config_index
 
+    save_field_responses = getattr(args, "save_field_responses", False)
+    requested_field_flags = (
+        getattr(args, "compute_polarization", False),
+        getattr(args, "compute_becs", False),
+        getattr(args, "compute_polarizability", False),
+    )
+    if save_field_responses and not any(requested_field_flags):
+        requested_field_flags = (True, True, True)
+
     mace_calc = MACECalculator(
         model_paths=mace_fname,
         device=args.device,
         default_dtype=args.default_dtype,
+        model_type=getattr(args, "model_type", "MACE"),
+        head=getattr(args, "head", None),
+        electric_field=getattr(args, "electric_field", None),
+        compute_polarization=(
+            requested_field_flags[0] if save_field_responses else False
+        ),
+        compute_becs=requested_field_flags[1] if save_field_responses else False,
+        compute_polarizability=(
+            requested_field_flags[2] if save_field_responses else False
+        ),
     )
 
     NSTEPS = args.nsteps
@@ -181,7 +249,14 @@ def run(args: argparse.Namespace) -> None:
     )
 
     dyn.attach(printenergy, interval=args.nsave, dyn=dyn, start_time=time.time())
-    dyn.attach(save_config, interval=args.nsave, dyn=dyn, fname=args.output)
+    dyn.attach(
+        save_config,
+        interval=args.nsave,
+        dyn=dyn,
+        fname=args.output,
+        save_field_responses=save_field_responses,
+        info_prefix=args.info_prefix,
+    )
     dyn.attach(
         stop_error, interval=args.ncheckerror, dyn=dyn, threshold=args.error_threshold
     )

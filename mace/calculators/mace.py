@@ -1,4 +1,5 @@
 ###########################################################################################
+# pylint: disable=too-many-lines
 # The ASE Calculator for MACE
 # Authors: Ilyes Batatia, David Kovacs
 # This program is distributed under the MIT License (see MIT.md)
@@ -21,6 +22,7 @@ from ase.stress import full_3x3_to_voigt_6_stress
 from e3nn import o3
 
 from mace import data as mace_data
+from mace.modules.extensions import is_macefield_model
 from mace.modules.utils import extract_invariant
 from mace.tools import torch_geometric, torch_tools, utils
 from mace.tools.compile import (
@@ -122,6 +124,9 @@ class MACECalculator(Calculator):
         compute_bec: bool = False,
         external_field: Union[list, None] = None,
         electric_field: Union[list, None] = None,
+        compute_polarization: Union[bool, None] = None,
+        compute_becs: Union[bool, None] = None,
+        compute_polarizability: Union[bool, None] = None,
         eps_infty: float = None,
         electric_field_unit: float = 1.0,
         keep_neutral: bool = True,
@@ -140,6 +145,9 @@ class MACECalculator(Calculator):
                 )
         self.external_field = external_field
         self.electric_field = electric_field
+        self.compute_polarization = compute_polarization
+        self.compute_becs = compute_becs
+        self.compute_polarizability = compute_polarizability
         self.eps_infty = eps_infty
         self.electric_field_unit = electric_field_unit
         self.keep_neutral = keep_neutral
@@ -270,6 +278,28 @@ class MACECalculator(Calculator):
             self.models = models
             self.num_models = len(models)
 
+        self.is_macefield = any(is_macefield_model(model) for model in self.models)
+        if self.model_type == "MACEField" and not self.is_macefield:
+            raise ValueError(
+                "model_type='MACEField' requires a native or converted MACEField model"
+            )
+        if (
+            self.compute_polarization is True
+            or self.compute_becs is True
+            or self.compute_polarizability is True
+        ) and not self.is_macefield:
+            raise ValueError(
+                "MACEField polarization, BEC, and polarizability outputs require "
+                "a MACEField model"
+            )
+        if self.is_macefield and self.model_type == "MACE":
+            # Infer the extension for callers that pass a model object or
+            # converted checkpoint without repeating its model type.
+            self.model_type = "MACEField"
+            self.implemented_properties.extend(
+                ["polarization", "becs", "polarizability"]
+            )
+
         if self.num_models > 1:
             logging.info(f"Running committee mace with {self.num_models} models")
 
@@ -283,7 +313,7 @@ class MACECalculator(Calculator):
                 "DipolePolarizabilityMACE",
             ]:
                 self.implemented_properties.extend(["dipole_var"])
-            if model_type == "MACEField":
+            if self.is_macefield:
                 self.implemented_properties.extend(
                     ["polarization_var", "becs_var", "polarizability_var"]
                 )
@@ -722,7 +752,7 @@ class MACECalculator(Calculator):
                     dtype=batch_dict["positions"].dtype,
                 )
 
-            if self.model_type == "MACEField":
+            if self.is_macefield:
                 batch_dict["electric_field"] = self._resolve_electric_field(atoms).to(
                     device=batch_dict["positions"].device,
                     dtype=batch_dict["positions"].dtype,
@@ -736,14 +766,33 @@ class MACECalculator(Calculator):
             }
             if getattr(self, "compute_bec", False):
                 model_kwargs["compute_bec"] = True
-            if self.model_type == "MACEField":
+            if self.is_macefield:
+                field_compute_polarization = self.compute_polarization
+                field_compute_becs = self.compute_becs
+                field_compute_polarizability = self.compute_polarizability
+                if field_compute_polarization is None:
+                    field_compute_polarization = True
+                if field_compute_becs is None:
+                    field_compute_becs = True
+                if field_compute_polarizability is None:
+                    field_compute_polarizability = True
+                field_compute_polarization = bool(
+                    field_compute_polarization
+                    or field_compute_becs
+                    or field_compute_polarizability
+                )
                 model_kwargs.update(
                     compute_force=True,
-                    compute_polarization=True,
-                    compute_becs=True,
-                    compute_polarizability=True,
+                    compute_polarization=field_compute_polarization,
+                    compute_becs=bool(field_compute_becs),
+                    compute_polarizability=bool(field_compute_polarizability),
                     electric_field=batch_dict["electric_field"],
-                    training=True,
+                    training=(
+                        model_kwargs["training"]
+                        or field_compute_polarization
+                        or field_compute_becs
+                        or field_compute_polarizability
+                    ),
                 )
 
             # Scoped here too, not only around batch construction: extensions
@@ -766,10 +815,8 @@ class MACECalculator(Calculator):
         self.results = {}
         scalar_tensors = set(["energy"])
         results_store_ensemble = set(["energy", "forces", "stress", "dipole"])
-        if self.model_type == "MACEField":
-            results_store_ensemble.update(
-                {"polarization", "becs", "polarizability"}
-            )
+        if self.is_macefield:
+            results_store_ensemble.update({"polarization", "becs", "polarizability"})
         results_map = [
             ("energy", "energy", self.energy_units_to_eV),
             ("node_energy", "node_energy", self.energy_units_to_eV),
@@ -787,7 +834,11 @@ class MACECalculator(Calculator):
             ),
             ("dipole", "dipole", 1.0),
             ("charges", "charges", 1.0),
-            ("polarization", "polarization", self.energy_units_to_eV / self.length_units_to_A**2),
+            (
+                "polarization",
+                "polarization",
+                self.energy_units_to_eV / self.length_units_to_A**2,
+            ),
             ("becs", "becs", 1.0),
             ("polarizability", "polarizability", 1.0),
             ("polarizability_sh", "polarizability_sh", 1.0),
@@ -851,7 +902,7 @@ class MACECalculator(Calculator):
                     for stress in self.results["stresses"]
                 ]
             )
-        if self.model_type == "MACEField":
+        if self.is_macefield:
             if self.results.get("becs") is not None:
                 self.results["becs"] = self.results["becs"].reshape(len(atoms), 9)
             if self.results.get("becs_comm") is not None:
@@ -863,9 +914,9 @@ class MACECalculator(Calculator):
                     len(atoms), 9
                 )
             if self.results.get("polarizability") is not None:
-                self.results["polarizability"] = self.results[
-                    "polarizability"
-                ].reshape(9)
+                self.results["polarizability"] = self.results["polarizability"].reshape(
+                    9
+                )
             if self.results.get("polarizability_comm") is not None:
                 self.results["polarizability_comm"] = self.results[
                     "polarizability_comm"
@@ -1005,16 +1056,35 @@ class MACECalculator(Calculator):
             raise ValueError("atoms not set")
         if atoms is None:
             atoms = self.atoms
-        if self.model_type != "MACE":
-            raise NotImplementedError("Only implemented for MACE models")
+        if self.model_type not in ("MACE", "MACEField"):
+            raise NotImplementedError("Only implemented for MACE and MACEField models")
         num_interactions = int(self.models[0].num_interactions)
         if num_layers == -1:
             num_layers = num_interactions
         batch = self._atoms_to_batch(atoms)
         with torch_tools.default_dtype(self.default_dtype):
-            descriptors = [
-                model(batch.to_dict())["node_feats"] for model in self.models
-            ]
+            descriptors = []
+            for model in self.models:
+                batch_dict = batch.to_dict()
+                if self.is_macefield or is_macefield_model(model):
+                    batch_dict["electric_field"] = self._resolve_electric_field(
+                        atoms
+                    ).to(
+                        device=batch_dict["positions"].device,
+                        dtype=batch_dict["positions"].dtype,
+                    )
+                    output = model(
+                        batch_dict,
+                        compute_force=False,
+                        compute_stress=False,
+                        compute_polarization=False,
+                        compute_becs=False,
+                        compute_polarizability=False,
+                        electric_field=batch_dict["electric_field"],
+                    )
+                else:
+                    output = model(batch_dict)
+                descriptors.append(output["node_feats"])
 
         irreps_out = o3.Irreps(str(self.models[0].products[0].linear.irreps_out))
         l_max = irreps_out.lmax

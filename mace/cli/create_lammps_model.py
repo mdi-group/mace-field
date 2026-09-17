@@ -42,6 +42,14 @@ def parse_args():
         help="Old libtorch format, or new mliap format",
         default="libtorch",
     )
+    parser.add_argument(
+        "--electric-field",
+        help="constant electric field components in V/A for MACEField",
+        type=float,
+        nargs=3,
+        metavar=("Ex", "Ey", "Ez"),
+        default=None,
+    )
     return parser.parse_args()
 
 
@@ -101,7 +109,9 @@ def main():
 
     lammps_class = LAMMPS_MLIAP_MACE if args.format == "mliap" else LAMMPS_MACE
     lammps_model = (
-        lammps_class(model, head=head) if head is not None else lammps_class(model)
+        lammps_class(model, head=head, electric_field=args.electric_field)
+        if head is not None
+        else lammps_class(model, electric_field=args.electric_field)
     )
     if args.format == "mliap":
         torch.save(lammps_model, model_path + "-mliap_lammps.pt")

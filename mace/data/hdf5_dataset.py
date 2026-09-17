@@ -2,6 +2,7 @@ from glob import glob
 from typing import List
 
 import h5py
+import torch
 from torch.utils.data import ConcatDataset, Dataset
 
 from mace.data.atomic_data import AtomicData
@@ -17,8 +18,15 @@ class HDF5Dataset(Dataset):
         self.file_path = file_path
         self._file = None
         batch_key = list(self.file.keys())[0]
-        self.batch_size = len(self.file[batch_key].keys())
-        self.length = len(self.file.keys()) * self.batch_size
+        self._direct_atomic_data = batch_key.startswith(
+            "config_"
+        ) and not batch_key.startswith("config_batch_")
+        if self._direct_atomic_data:
+            self.batch_size = 1
+            self.length = len(self.file.keys())
+        else:
+            self.batch_size = len(self.file[batch_key].keys())
+            self.length = len(self.file.keys()) * self.batch_size
         self.r_max = r_max
         self.z_table = z_table
         self.atomic_dataclass = atomic_dataclass
@@ -46,6 +54,9 @@ class HDF5Dataset(Dataset):
         return self.length
 
     def __getitem__(self, index):
+        if self._direct_atomic_data:
+            return self._get_direct_atomic_data(index)
+
         # compute the index of the batch
         batch_index = index // self.batch_size
         config_index = index % self.batch_size
@@ -79,6 +90,50 @@ class HDF5Dataset(Dataset):
             **{k: v for k, v in self.kwargs.items() if k != "heads"},
         )
         return atomic_data
+
+    def _get_direct_atomic_data(self, index):
+        """Read the flat ``save_dataset_as_HDF5`` representation."""
+        group = self.file[f"config_{index}"]
+
+        def read(name, default=None):
+            if name not in group:
+                return default
+            return torch.as_tensor(group[name][()])
+
+        return self.atomic_dataclass(
+            edge_index=read("edge_index"),
+            node_attrs=read("node_attrs"),
+            positions=read("positions"),
+            shifts=read("shifts"),
+            unit_shifts=read("unit_shifts"),
+            cell=read("cell"),
+            weight=read("weight"),
+            head=read("head"),
+            energy_weight=read("energy_weight"),
+            forces_weight=read("forces_weight"),
+            stress_weight=read("stress_weight"),
+            virials_weight=read("virials_weight"),
+            dipole_weight=None,
+            charges_weight=None,
+            polarization_weight=read("polarization_weight"),
+            becs_weight=read("becs_weight"),
+            polarizability_weight=read("polarizability_weight"),
+            magforces_weight=None,
+            forces=read("forces"),
+            energy=read("energy"),
+            stress=read("stress"),
+            virials=read("virials"),
+            dipole=read("dipole"),
+            charges=read("charges"),
+            polarizability=read("polarizability"),
+            magmom=None,
+            magforces=None,
+            elec_temp=None,
+            pbc=read("pbc"),
+            electric_field=read("electric_field"),
+            polarization=read("polarization"),
+            becs=read("becs"),
+        )
 
 
 def dataset_from_sharded_hdf5(

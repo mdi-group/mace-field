@@ -73,7 +73,9 @@ def _copy_readout_heads(
         target_hidden_dim = _irreps_dim(target.linear_1)
         if source_hidden_dim is None or target_hidden_dim is None:
             return False
-        if source_hidden_dim % len(source_heads) or target_hidden_dim % len(target_heads):
+        if source_hidden_dim % len(source_heads) or target_hidden_dim % len(
+            target_heads
+        ):
             return False
         source_hidden_per_head = source_hidden_dim // len(source_heads)
         target_hidden_per_head = target_hidden_dim // len(target_heads)
@@ -90,12 +92,17 @@ def _copy_readout_heads(
             torch.cat(
                 [
                     source_linear_1[
-                        :, index * source_hidden_per_head : (index + 1) * source_hidden_per_head
+                        :,
+                        index
+                        * source_hidden_per_head : (index + 1)
+                        * source_hidden_per_head,
                     ]
                     for index in source_indices
                 ],
                 dim=1,
-            ).reshape(-1).clone()
+            )
+            .reshape(-1)
+            .clone()
         )
         if (
             source.linear_1.bias is not None
@@ -127,11 +134,13 @@ def _copy_readout_heads(
         )
         for target_index, source_index in enumerate(source_indices):
             target_linear_2[
-                    target_index * target_hidden_per_head : (target_index + 1)
-                    * target_hidden_per_head,
+                target_index
+                * target_hidden_per_head : (target_index + 1)
+                * target_hidden_per_head,
                 target_index,
             ] = source_linear_2[
-                source_index * source_hidden_per_head : (source_index + 1)
+                source_index
+                * source_hidden_per_head : (source_index + 1)
                 * source_hidden_per_head,
                 source_index,
             ]
@@ -363,7 +372,9 @@ def load_foundations_elements_default(
             model_foundations.products[i].linear.weight.clone()
         )
 
-    readouts_loaded = _copy_readout_heads(model, model_foundations) if load_readout else False
+    readouts_loaded = (
+        _copy_readout_heads(model, model_foundations) if load_readout else False
+    )
     if load_readout and not readouts_loaded:
         # Transferring readouts
         for i, readout in enumerate(model.readouts):
@@ -475,7 +486,10 @@ def load_foundations_elements_default(
         # MACE-Field adds its field-coupling modules to the target model, but
         # a plain foundation checkpoint (including MACE-MH-1) has no matching
         # children.  Leave those newly initialized modules untouched.
-        if attr_name not in model_foundations._modules:  # pylint: disable=protected-access
+        # The checkpoint module registry is the authoritative way to match
+        # optional extension modules such as MACEField's field coupling.
+        # pylint: disable-next=protected-access
+        if attr_name not in model_foundations._modules:
             continue
         submodules = (
             list(zip(module, model_foundations.__dict__["_modules"][attr_name]))

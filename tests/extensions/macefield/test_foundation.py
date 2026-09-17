@@ -5,11 +5,18 @@ import torch
 from e3nn import o3
 
 from mace import data
-from mace.modules import MACEField, ScaleShiftMACE, interaction_classes
+from mace.modules import MACEField as PublicMACEField
+from mace.modules import ScaleShiftMACE, interaction_classes
+from mace.modules.extensions import MACEField
 from mace.tools import torch_geometric
 from mace.tools.finetuning_utils import load_foundations_elements
 from mace.tools.torch_tools import default_dtype
 from mace.tools.utils import AtomicNumberTable
+
+
+def test_macefield_public_exports_same_class():
+    """The extension module and package-level export share one class."""
+    assert PublicMACEField is MACEField
 
 
 def _foundation_config(heads, atomic_energies):
@@ -76,9 +83,7 @@ def test_macefield_finetunes_new_multhead_foundation():
 
         config = data.Configuration(
             atomic_numbers=np.array([8, 1, 1]),
-            positions=np.array(
-                [[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.32, 0.94, 0.0]]
-            ),
+            positions=np.array([[0.0, 0.0, 0.0], [0.96, 0.0, 0.0], [-0.32, 0.94, 0.0]]),
             pbc=(True, True, True),
             cell=np.diag([8.0, 8.0, 8.0]),
             properties={},

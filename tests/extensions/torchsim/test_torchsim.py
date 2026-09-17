@@ -16,6 +16,8 @@ import numpy as np
 import pytest
 import torch
 
+from mace.modules import MACEField, interaction_classes
+from mace.tools.torch_tools import default_dtype
 from tests.helpers import (
     CUET_AVAILABLE,
     GRAPH_LONGRANGE_AVAILABLE,
@@ -34,6 +36,30 @@ pytestmark = [
 DEVICE = torch.device("cpu")
 DTYPE = torch.float64
 POLAR_MODEL_NAME = "polar-1-s"
+
+
+MACEFIELD_CONFIG = dict(
+    r_max=5.0,
+    num_bessel=8,
+    num_polynomial_cutoff=6,
+    max_ell=2,
+    interaction_cls=interaction_classes["RealAgnosticResidualInteractionBlock"],
+    interaction_cls_first=interaction_classes[
+        "RealAgnosticResidualInteractionBlock"
+    ],
+    num_interactions=2,
+    num_elements=2,
+    hidden_irreps="8x0e + 8x1o",
+    MLP_irreps="4x0e",
+    gate=torch.nn.functional.silu,
+    atomic_energies=np.zeros(2),
+    avg_num_neighbors=8,
+    atomic_numbers=[1, 8],
+    correlation=3,
+    radial_type="bessel",
+    atomic_inter_shift=0.0,
+    atomic_inter_scale=1.0,
+)
 
 pytest_mace_dir = Path(__file__).parent.parent
 
@@ -292,6 +318,39 @@ def test_mace_torchsim_no_stress(trained_model_path, water_sim_state):
     results = model(water_sim_state)
     assert "energy" in results
     assert "forces" in results
+
+
+@pytest.fixture(scope="module")
+def macefield_raw_model():
+    with default_dtype(DTYPE):
+        return MACEField(**MACEFIELD_CONFIG)
+
+
+def test_macefield_torchsim_response_outputs(macefield_raw_model, water_sim_state):
+    """TorchSim forwards the field and slices all MACEField responses."""
+    from mace.calculators.mace_torchsim import MaceTorchSimModel
+
+    model = MaceTorchSimModel(
+        model=macefield_raw_model,
+        device=DEVICE,
+        dtype=DTYPE,
+        compute_forces=True,
+        compute_stress=True,
+        compute_polarization=False,
+        compute_becs=True,
+        compute_polarizability=True,
+        electric_field=torch.tensor([[0.01, -0.02, 0.03]], dtype=DTYPE),
+    )
+    state = water_sim_state.clone()
+    state.electric_field = torch.zeros(1, 3, dtype=DTYPE)
+    results = model(state)
+
+    assert results["energy"].shape == (1,)
+    assert results["forces"].shape == (3, 3)
+    assert results["stress"].shape == (1, 3, 3)
+    assert results["polarization"].shape == (1, 3)
+    assert results["becs"].shape == (3, 3, 3)
+    assert results["polarizability"].shape == (1, 3, 3)
 
 
 

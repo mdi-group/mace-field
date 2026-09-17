@@ -16,6 +16,7 @@ from e3nn import o3
 from mace import data
 from mace.cli.convert_e3nn_cueq import run as run_e3nn_to_cueq
 from mace.data import KeySpecification, update_keyspec_from_kwargs
+from mace.modules.extensions import is_macefield_model
 from mace.modules.utils import extract_invariant
 from mace.tools import torch_geometric, torch_tools, utils
 from mace.tools.default_keys import DefaultKeys
@@ -208,10 +209,8 @@ def run(args: argparse.Namespace) -> None:
     # Load model
     model = torch.load(f=args.model, map_location=args.device)
     if (
-        args.compute_polarization
-        or args.compute_becs
-        or args.compute_polarizability
-    ) and model.__class__.__name__ != "MACEField":
+        args.compute_polarization or args.compute_becs or args.compute_polarizability
+    ) and not is_macefield_model(model):
         raise ValueError(
             "MACEField polarization, BEC, and polarizability outputs require "
             "a MACEField model."
@@ -272,7 +271,9 @@ def run(args: argparse.Namespace) -> None:
         drop_last=False,
     )
     electric_field = (
-        torch.tensor(args.electric_field, dtype=torch.get_default_dtype(), device=device)
+        torch.tensor(
+            args.electric_field, dtype=torch.get_default_dtype(), device=device
+        )
         if args.electric_field is not None
         else None
     )
@@ -327,11 +328,9 @@ def run(args: argparse.Namespace) -> None:
                 indices_or_sections=batch.ptr[1:],
                 axis=0,
             )
-            becs_field_list.append([b for b in becs_field[:-1]])
+            becs_field_list.append(list(becs_field[:-1]))
         if args.compute_polarizability:
-            polarizability_list.append(
-                torch_tools.to_numpy(output["polarizability"])
-            )
+            polarizability_list.append(torch_tools.to_numpy(output["polarizability"]))
 
         if "latent_charges" in output and output["latent_charges"] is not None:
             qs = np.split(
@@ -459,9 +458,7 @@ def run(args: argparse.Namespace) -> None:
             for polarization in np.atleast_1d(sublist)
         ]
     if args.compute_becs:
-        becs_field_list = [
-            becs for sublist in becs_field_list for becs in sublist
-        ]
+        becs_field_list = [becs for sublist in becs_field_list for becs in sublist]
     if args.compute_polarizability:
         polarizability_list = [
             polarizability

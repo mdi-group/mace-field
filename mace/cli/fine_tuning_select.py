@@ -53,6 +53,7 @@ class SelectionSettings:
     num_samples: int | None = None
     subselect: SubselectType = SubselectType.FPS
     model: str = "small"
+    model_type: str = "MACE"
     descriptors: str | None = None
     device: str = "cpu"
     default_dtype: str = "float64"
@@ -64,6 +65,7 @@ class SelectionSettings:
     allow_random_padding: bool = True
     seed: int = 42
     config: str | None = None
+    electric_field: List[float] | None = None
 
 
 def str_to_list(s: str) -> List[int]:
@@ -118,6 +120,12 @@ def build_default_finetuning_select_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model", help="path to model", default="small", required=False
     )
+    parser.add_argument(
+        "--model_type",
+        help="model type passed to MACECalculator",
+        type=str,
+        default="MACE",
+    )
     parser.add_argument("--output", help="output path", required=True)
     parser.add_argument(
         "--descriptors", help="path to descriptors", required=False, default=None
@@ -138,6 +146,7 @@ def build_default_finetuning_select_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--head_pt",
+        "--head",
         help="level of head for the pretraining set",
         type=str,
         default=None,
@@ -180,6 +189,14 @@ def build_default_finetuning_select_arg_parser() -> argparse.ArgumentParser:
         dest="allow_random_padding",
     )
     parser.add_argument("--seed", help="random seed", type=int, default=42)
+    parser.add_argument(
+        "--electric-field",
+        help="constant electric field components in V/A for MACEField descriptors",
+        type=float,
+        nargs=3,
+        metavar=("Ex", "Ey", "Ez"),
+        default=None,
+    )
     return parser
 
 
@@ -291,11 +308,22 @@ class FPS:
 
 
 def _load_calc(
-    model: str, device: str, default_dtype: str, head: str, subselect: SubselectType
+    model: str,
+    device: str,
+    default_dtype: str,
+    head: str,
+    subselect: SubselectType,
+    model_type: str = "MACE",
+    electric_field: List[float] | None = None,
 ) -> Union[MACECalculator, None]:
     if subselect == SubselectType.RANDOM:
         return None
     if model in filter(None, mace_mp_names):
+        if model_type != "MACE":
+            raise ValueError(
+                "Named MACE foundation calculators do not provide MACEField; "
+                "use a MACEField checkpoint path with --model_type MACEField."
+            )
         calc = mace_mp(model, device=device, head=head, default_dtype=default_dtype)
     else:
         calc = MACECalculator(
@@ -303,6 +331,8 @@ def _load_calc(
             device=device,
             head=head,
             default_dtype=default_dtype,
+            model_type=model_type,
+            electric_field=electric_field,
         )
     return calc
 
@@ -498,6 +528,8 @@ def select_samples(
         settings.default_dtype,
         settings.head_pt,
         settings.subselect,
+        settings.model_type,
+        settings.electric_field,
     )
     atoms_list_ft = _read_finetuning_configs(settings.configs_ft)
     all_species_ft = _get_finetuning_elements(

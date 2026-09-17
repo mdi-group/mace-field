@@ -274,7 +274,7 @@ class MACE(torch.nn.Module):
                     )
                 )
 
-    def forward(
+    def forward(  # pylint: disable=unused-argument
         self,
         data: Dict[str, torch.Tensor],
         training: bool = False,
@@ -286,6 +286,12 @@ class MACE(torch.nn.Module):
         compute_edge_forces: bool = False,
         compute_atomic_stresses: bool = False,
         lammps_mliap: bool = False,
+        compute_polarization: bool = False,  # pylint: disable=unused-argument
+        compute_becs: bool = False,  # pylint: disable=unused-argument
+        compute_polarizability: bool = False,  # pylint: disable=unused-argument
+        electric_field: Optional[
+            torch.Tensor
+        ] = None,  # pylint: disable=unused-argument
     ) -> Dict[str, Optional[torch.Tensor]]:
         # Setup
         ctx = prepare_graph(
@@ -465,6 +471,12 @@ class ScaleShiftMACE(MACE):
         compute_edge_forces: bool = False,
         compute_atomic_stresses: bool = False,
         lammps_mliap: bool = False,
+        compute_polarization: bool = False,  # pylint: disable=unused-argument
+        compute_becs: bool = False,  # pylint: disable=unused-argument
+        compute_polarizability: bool = False,  # pylint: disable=unused-argument
+        electric_field: Optional[
+            torch.Tensor
+        ] = None,  # pylint: disable=unused-argument
     ) -> Dict[str, Optional[torch.Tensor]]:
         # Setup
         ctx = prepare_graph(

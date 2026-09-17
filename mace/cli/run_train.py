@@ -427,7 +427,17 @@ def run(args) -> None:
         logging.info(
             "==================Using multiheads finetuning mode=================="
         )
-        args.loss = "universal"
+        if args.model == "MACEField":
+            args.loss = "universal_field"
+            args.compute_polarization = args.compute_polarization or (
+                args.polarization_weight != 0
+            )
+            args.compute_becs = args.compute_becs or args.becs_weight != 0
+            args.compute_polarizability = args.compute_polarizability or (
+                args.polarizability_weight != 0
+            )
+        else:
+            args.loss = "universal"
 
         all_ase_readable = all(
             all(check_path_ase_read(f) for f in head_config.train_file)
@@ -658,6 +668,9 @@ def run(args) -> None:
                 device=device,
                 batch_size=args.batch_size,
                 force_stress=args.pseudolabel_replay_compute_stress,
+                compute_polarization=args.compute_polarization,
+                compute_becs=args.compute_becs,
+                compute_polarizability=args.compute_polarizability,
             ):
                 logging.info("Successfully applied pseudolabels to pt_head configurations")
             else:
@@ -859,6 +872,7 @@ def run(args) -> None:
             "MACE",
             "ScaleShiftMACE",
             "MACELES",
+            "MACEField",
             "PolarMACE",
             "MagneticScaleShiftMACE",
             "AtomicDielectricMACE",
@@ -870,6 +884,7 @@ def run(args) -> None:
             "MACE",
             "ScaleShiftMACE",
             "MACELES",
+            "MACEField",
             "PolarMACE",
             "MagneticScaleShiftMACE",
         ]

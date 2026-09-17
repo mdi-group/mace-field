@@ -29,11 +29,12 @@ from .blocks import (
     ScaleShiftBlock,
 )
 from .extensions import (
-    MACEField,
     MACELES,
+    MACEField,
     MagneticScaleShiftMACE,
     MagneticSCFMACE,
     PolarMACE,
+    is_macefield_model,
 )
 from .gate import GatedEquivariantBlock
 from .loss import (
@@ -123,6 +124,7 @@ __all__ = [
     "ScaleShiftMACE",
     "MACELES",
     "MACEField",
+    "is_macefield_model",
     "AtomicDipolesMACE",
     "AtomicDielectricMACE",
     "EnergyDipolesMACE",

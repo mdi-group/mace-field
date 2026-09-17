@@ -9,6 +9,8 @@ import torch
 from ase.data import chemical_symbols
 from e3nn.util.jit import compile_mode
 
+from mace.modules.extensions import is_macefield_model
+
 try:
     from lammps.mliap.mliap_unified_abc import MLIAPUnified
 except ImportError:
@@ -76,6 +78,17 @@ class MACEEdgeForcesWrapper(torch.nn.Module):
                 "total_spin", torch.tensor([1.0], dtype=torch.get_default_dtype())
             ),
         )
+        self.is_macefield: bool = is_macefield_model(model)
+        electric_field = kwargs.get("electric_field", None)
+        self.electric_field_is_set: bool = electric_field is not None
+        if electric_field is None:
+            electric_field = (0.0, 0.0, 0.0)
+        electric_field = torch.as_tensor(electric_field, dtype=self.r_max.dtype).view(
+            -1, 3
+        )
+        if electric_field.shape[0] != 1:
+            raise ValueError("electric_field must be a single 3-vector")
+        self.register_buffer("electric_field", electric_field)
 
         if not hasattr(model, "heads"):
             model.heads = ["Default"]
@@ -94,17 +107,37 @@ class MACEEdgeForcesWrapper(torch.nn.Module):
         data["head"] = self.head
         data["total_charge"] = self.total_charge
         data["total_spin"] = self.total_spin
+        if self.is_macefield:
+            data["electric_field"] = self.electric_field.to(
+                device=data["vectors"].device, dtype=data["vectors"].dtype
+            )
 
-        out = self.model(
-            data,
-            training=False,
-            compute_force=False,
-            compute_virials=False,
-            compute_stress=False,
-            compute_displacement=False,
-            compute_edge_forces=True,
-            lammps_mliap=True,
-        )
+        if self.is_macefield:
+            out = self.model(
+                data,
+                training=False,
+                compute_force=False,
+                compute_virials=False,
+                compute_stress=False,
+                compute_displacement=False,
+                compute_edge_forces=True,
+                lammps_mliap=True,
+                electric_field=data["electric_field"],
+                compute_polarization=False,
+                compute_becs=False,
+                compute_polarizability=False,
+            )
+        else:
+            out = self.model(
+                data,
+                training=False,
+                compute_force=False,
+                compute_virials=False,
+                compute_stress=False,
+                compute_displacement=False,
+                compute_edge_forces=True,
+                lammps_mliap=True,
+            )
 
         node_energy = out["node_energy"]
         pair_forces = out["edge_forces"]

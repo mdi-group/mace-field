@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, Optional, Union
 
 import torch
 
-from mace.modules.extensions import PolarMACE
+from mace.modules.extensions import PolarMACE, is_macefield_model
 from mace.tools import atomic_numbers_to_indices, utils
 
 log = logging.getLogger(__name__)
@@ -60,6 +60,10 @@ class MaceTorchSimModel(ModelInterface):
         neighbor_list_fn: Optional[Callable] = None,
         compute_forces: bool = True,
         compute_stress: bool = True,
+        compute_polarization: bool = False,
+        compute_becs: bool = False,
+        compute_polarizability: bool = False,
+        electric_field: Optional[torch.Tensor] = None,
         enable_cueq: bool = False,
         enable_oeq: bool = False,
         compile_mode: Optional[str] = None,
@@ -81,6 +85,17 @@ class MaceTorchSimModel(ModelInterface):
         self._dtype = dtype
         self._compute_forces = compute_forces
         self._compute_stress = compute_stress
+        self._compute_becs = compute_becs
+        self._compute_polarizability = compute_polarizability
+        self._compute_polarization = bool(
+            compute_polarization or compute_becs or compute_polarizability
+        )
+        self._electric_field_is_set = electric_field is not None
+        if electric_field is None:
+            electric_field = torch.zeros(1, 3, dtype=dtype)
+        self._electric_field = torch.as_tensor(electric_field, dtype=dtype).view(-1, 3)
+        if self._electric_field.shape[0] != 1:
+            raise ValueError("electric_field must be a single 3-vector")
         self._enable_cueq = enable_cueq
         self._enable_oeq = enable_oeq
         self._uses_accelerated = enable_cueq or enable_oeq
@@ -152,6 +167,14 @@ class MaceTorchSimModel(ModelInterface):
             p.requires_grad = False
 
         self._is_polar = isinstance(self.model, PolarMACE)
+        self._is_macefield = is_macefield_model(self.model)
+        if (
+            compute_polarization or compute_becs or compute_polarizability
+        ) and not self._is_macefield:
+            raise ValueError(
+                "MACEField polarization, BEC, and polarizability outputs require "
+                "a MACEField model"
+            )
         if self._is_polar:
             self._density_dim = (
                 getattr(self.model, "atomic_multipoles_max_l", 0) + 1
@@ -437,6 +460,14 @@ class MaceTorchSimModel(ModelInterface):
                 [data_dict["total_spin"], torch.ones(pad_sys, device=dev, dtype=dt)]
             )
 
+        if "electric_field" in data_dict:
+            padded["electric_field"] = torch.cat(
+                [
+                    data_dict["electric_field"],
+                    torch.zeros(pad_sys, 3, device=dev, dtype=dt),
+                ]
+            )
+
         if "rcell" in data_dict:
             cell_scale = self.r_max * 2.0
             rcell_pad = (
@@ -623,6 +654,26 @@ class MaceTorchSimModel(ModelInterface):
                     n_real_atoms,
                 )
             )
+        if self._is_macefield:
+            field = self._electric_field
+            state_field = getattr(sim_state, "electric_field", None)
+            if state_field is None:
+                state_field = getattr(sim_state, "external_E_field", None)
+            if self._electric_field_is_set:
+                field = self._electric_field
+            elif state_field is not None:
+                field = torch.as_tensor(
+                    state_field, device=self._device, dtype=self._dtype
+                ).view(-1, 3)
+            if field.shape[0] == 1:
+                field = field.expand(self.n_systems, 3)
+            if field.shape[0] != self.n_systems:
+                raise ValueError(
+                    "electric_field must contain one vector or one vector per system"
+                )
+            data_dict["electric_field"] = field.to(
+                device=self._device, dtype=self._dtype
+            )
 
         oeq_compile = self._use_compile and self._enable_oeq
         if oeq_compile and self._compute_stress:
@@ -648,12 +699,24 @@ class MaceTorchSimModel(ModelInterface):
         if self._use_cudagraphs:
             torch.compiler.cudagraph_mark_step_begin()
 
-        out = self.model(
-            data_dict,
-            compute_force=self._compute_forces,
-            compute_stress=self._compute_stress,
-            training=training,
-        )
+        if self._is_macefield:
+            out = self.model(
+                data_dict,
+                compute_force=self._compute_forces,
+                compute_stress=self._compute_stress,
+                training=training or self._compute_polarization,
+                compute_polarization=self._compute_polarization,
+                compute_becs=self._compute_becs,
+                compute_polarizability=self._compute_polarizability,
+                electric_field=data_dict["electric_field"],
+            )
+        else:
+            out = self.model(
+                data_dict,
+                compute_force=self._compute_forces,
+                compute_stress=self._compute_stress,
+                training=training,
+            )
 
         n_systems = self.n_systems
         results: Dict[str, torch.Tensor] = {}
@@ -683,7 +746,7 @@ class MaceTorchSimModel(ModelInterface):
             s = stress[:n_systems].detach()
             results["stress"] = s.clone() if self._use_cudagraphs else s
 
-        if self._is_polar:
+        if self._is_polar or self._is_macefield:
             per_system_keys = {
                 "dipole",
                 "electrostatic_energy",
@@ -694,6 +757,7 @@ class MaceTorchSimModel(ModelInterface):
                 "external_field",
                 "polarizability",
                 "polarizability_sh",
+                "polarization",
             }
             per_atom_keys = {
                 "charges",
@@ -702,6 +766,7 @@ class MaceTorchSimModel(ModelInterface):
                 "spin_charge_density",
                 "spins",
                 "node_energy",
+                "becs",
             }
             for key, val in out.items():
                 if key in ("energy", "forces", "stress") or not isinstance(

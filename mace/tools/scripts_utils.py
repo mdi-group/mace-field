@@ -228,14 +228,32 @@ def print_git_commit():
 
 
 def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
-    if model.__class__.__name__ not in [
-        "ScaleShiftMACE",
-        "MACELES",
-        "MACEField",
-        "PolarMACE",
-        "MagneticScaleShiftMACE",
-        "AtomicDielectricMACE",
-    ]:
+    model_is_macefield = modules.is_macefield_model(model)
+    # Conversion and device wrappers can hide the model attributes used below.
+    # Follow the same wrapper convention as the shared capability check before
+    # extracting a constructor config.
+    for _ in range(8):
+        if hasattr(model, "readouts"):
+            break
+        for attr in ("_orig_mod", "module", "model"):
+            wrapped = getattr(model, attr, None)
+            if isinstance(wrapped, torch.nn.Module):
+                model = wrapped
+                break
+        else:
+            break
+
+    if (
+        model.__class__.__name__
+        not in [
+            "ScaleShiftMACE",
+            "MACELES",
+            "PolarMACE",
+            "MagneticScaleShiftMACE",
+            "AtomicDielectricMACE",
+        ]
+        and not model_is_macefield
+    ):
         return {
             "error": "Model is not a ScaleShiftMACE, MACELES, MACEField, PolarMACE, MagneticScaleShiftMACE, or AtomicDielectricMACE model"
         }
@@ -344,7 +362,7 @@ def extract_config_mace_model(model: torch.nn.Module) -> Dict[str, Any]:
     if hasattr(model, "scale_shift"):
         config["atomic_inter_scale"] = scale.cpu().numpy()
         config["atomic_inter_shift"] = shift.cpu().numpy()
-    if model.__class__.__name__ in ["ScaleShiftMACE", "MACELES", "MACEField"]:
+    if model.__class__.__name__ in ["ScaleShiftMACE", "MACELES"] or model_is_macefield:
         config["MLP_irreps"] = o3.Irreps(f"{mlp_scalars_per_head}x0e")
     if model.__class__.__name__ == "AtomicDielectricMACE":
         config["use_polarizability"] = model.use_polarizability
