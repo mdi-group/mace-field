@@ -480,11 +480,29 @@ class MACECalculator(Calculator):
         """
         Calculator.calculate(self, atoms)
 
+        # MACE-Field exposes several expensive derivative responses. Older
+        # versions computed all of them for every ASE request, even when the
+        # caller only needed an energy and polarisation for a path image. Use
+        # ASE's requested-property list to avoid force, stress, BEC, and
+        # polarizability autograd work when it is not needed. ``None`` keeps
+        # the historical all-properties behaviour for unusual direct calls.
+        requested = set(properties or ())
+        all_properties = properties is None
+        compute_forces = all_properties or bool(
+            requested.intersection({"forces", "stress", "stresses", "virials"})
+        )
+        compute_stress = (
+            all_properties or "stress" in requested
+        ) and not self.use_compile
+        compute_polarization = all_properties or bool(
+            requested.intersection({"polarization", "becs", "polarizability"})
+        )
+        compute_becs = all_properties or "becs" in requested
+        compute_polarizability = all_properties or "polarizability" in requested
+
         batch_base = self._atoms_to_batch(atoms)
 
-        if self.model_type in ["MACE", "EnergyDipoleMACE", "MACEField"]:
-            compute_stress = not self.use_compile
-        else:
+        if self.model_type not in ["MACE", "EnergyDipoleMACE", "MACEField"]:
             compute_stress = False
 
         if self.model_type == "MACEField":
@@ -501,11 +519,11 @@ class MACECalculator(Calculator):
                 ef = self._resolve_electric_field(atoms)
                 out = model(
                     batch.to_dict(),
-                    compute_force=True,
+                    compute_force=compute_forces,
                     compute_stress=compute_stress,
-                    compute_polarization=True,
-                    compute_becs=True,
-                    compute_polarizability=True,
+                    compute_polarization=compute_polarization,
+                    compute_becs=compute_becs,
+                    compute_polarizability=compute_polarizability,
                     electric_field=ef,
                     training=True,
                     compute_edge_forces=self.compute_atomic_stresses,
