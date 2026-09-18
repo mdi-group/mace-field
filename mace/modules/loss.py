@@ -753,14 +753,20 @@ class UniversalFieldLoss(torch.nn.Module):
     def forward(
         self, ref: Batch, pred: TensorDict, ddp: Optional[bool] = None
     ) -> torch.Tensor:
-        # Helper: check that a key is present if its global weight is non-zero
+        # Helper: check that a key is present when its batch labels are active
         def _require_key(name: str, weight_buf: torch.Tensor) -> bool:
             """Return True if this loss term should be used; raise if required but missing."""
-            has_ref = hasattr(ref, name) or (name in ref)
+            ref_weight = getattr(ref, f"{name}_weight", None)
+            has_active_ref = ref_weight is not None and bool(
+                torch.any(ref_weight != 0).item()
+            )
+            has_ref = (has_active_ref and (hasattr(ref, name) or (name in ref)))
             has_pred = name in pred
 
-            if float(weight_buf) == 0.0:
-                # Globally disabled: skip regardless of presence.
+            if float(weight_buf) == 0.0 or not has_active_ref:
+                # Skip globally disabled terms and batches without labels.  The
+                # latter permits MACEField's response-aware output selection to
+                # avoid unnecessary second derivatives on replay-only batches.
                 return False
 
             if not has_ref or not has_pred:

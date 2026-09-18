@@ -711,14 +711,23 @@ def compute_dielectric_gradients_loop(
 def get_polarization(
     energy: torch.Tensor,
     electric_field: torch.Tensor,
+    create_graph: bool = True,
+    graph_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
+    if graph_mask is not None:
+        if not bool(torch.any(graph_mask).item()):
+            return torch.zeros_like(electric_field)
+        energy = energy[graph_mask]
     grad_outputs: List[Optional[torch.Tensor]] = [torch.ones_like(energy)]
     polarization = torch.autograd.grad(
         outputs=[energy],  # [n_graphs, ...]
         inputs=[electric_field],  # [n_graphs, 3] or [1, 3]
         grad_outputs=grad_outputs,
-        retain_graph=True,  # keep graph
-        create_graph=True,  # higher derivatives
+        # Keep the energy graph alive because force/stress evaluation may have
+        # run before this derivative.  ``create_graph`` controls whether the
+        # response itself remains differentiable for training.
+        retain_graph=True,
+        create_graph=create_graph,  # higher derivatives when training
         allow_unused=True,  # <- important
     )[0]
 
@@ -734,10 +743,22 @@ def get_polarization(
 def get_becs(
     polarization: torch.Tensor,
     positions: torch.Tensor,
+    create_graph: bool = True,
+    graph_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     becs_polar_list = []
     for d in range(3):  # Loop over dimensions
         polar_component = polarization[:, d]  # [n_graphs]
+        if graph_mask is not None:
+            if not bool(torch.any(graph_mask).item()):
+                return torch.zeros(
+                    positions.shape[0],
+                    3,
+                    3,
+                    device=positions.device,
+                    dtype=positions.dtype,
+                )
+            polar_component = polar_component[graph_mask]
         polar_grad_outputs: List[Optional[torch.Tensor]] = [
             torch.ones_like(polar_component)
         ]
@@ -746,7 +767,7 @@ def get_becs(
             inputs=[positions],  # [n_nodes, 3]
             grad_outputs=polar_grad_outputs,
             retain_graph=True,
-            create_graph=True,
+            create_graph=create_graph,
             allow_unused=True,  # <- important
         )[0]
         if gradient is None:
@@ -759,18 +780,30 @@ def get_becs(
 def get_polarizability(
     polarization: torch.Tensor,
     electric_field: torch.Tensor,
+    create_graph: bool = True,
+    graph_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     # Second derivatives (BEC and polarizability) computed for each polarization component.
     polarizability_list = []
     for d in range(3):
         polar_component = polarization[:, d]  # [n_graphs]
+        if graph_mask is not None:
+            if not bool(torch.any(graph_mask).item()):
+                return torch.zeros(
+                    polarization.shape[0],
+                    3,
+                    3,
+                    device=polarization.device,
+                    dtype=polarization.dtype,
+                )
+            polar_component = polar_component[graph_mask]
         grad_outputs: List[Optional[torch.Tensor]] = [torch.ones_like(polar_component)]
         grad_field = torch.autograd.grad(
             outputs=[polar_component],  # [n_graphs]
             inputs=[electric_field],  # [n_graphs, 3] or [1, 3]
             grad_outputs=grad_outputs,
             retain_graph=True,
-            create_graph=True,
+            create_graph=create_graph,
             allow_unused=True,  # <- important
         )[0]
         if grad_field is None:

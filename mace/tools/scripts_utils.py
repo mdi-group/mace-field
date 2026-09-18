@@ -141,6 +141,7 @@ def get_dataset_from_xyz(
                 key_specification=key_specification,
                 extract_atomic_energies=False,
                 head_name=head_name,
+                no_data_ok=no_data_ok,
             )
             all_valid_configs.extend(valid_configs)
             log_dataset_contents(

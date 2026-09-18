@@ -47,6 +47,45 @@ class SWAContainer:
     loss_fn: torch.nn.Module
 
 
+def _has_active_property_weight(batch, name: str) -> bool:
+    """Return whether a response label is active in this batch.
+
+    AtomicData carries zero-valued placeholders for missing properties.  The
+    corresponding per-property weights are the authoritative indication that
+    a response should be evaluated.  Avoiding unused second derivatives is
+    important for large structures and leaves ordinary MACE batches on the
+    same forward path as before.
+    """
+    weights = getattr(batch, f"{name}_weight", None)
+    return weights is not None and bool(torch.any(weights != 0).item())
+
+
+def _model_output_kwargs(batch, output_args: Dict[str, bool], training: bool):
+    """Build model output flags, computing field responses only when labelled."""
+    kwargs = dict(
+        training=training,
+        compute_force=output_args["forces"],
+        compute_virials=output_args["virials"],
+        compute_stress=output_args["stress"],
+    )
+    if output_args.get("magforces", False):
+        kwargs["compute_magforces"] = True
+
+    polarization = output_args.get("polarization", False) and _has_active_property_weight(
+        batch, "polarization"
+    )
+    becs = output_args.get("becs", False) and _has_active_property_weight(batch, "becs")
+    polarizability = output_args.get("polarizability", False) and _has_active_property_weight(
+        batch, "polarizability"
+    )
+    # BECs and polarizabilities are derived from polarization, so they imply
+    # the first response even when no standalone polarization label is present.
+    kwargs["compute_polarization"] = polarization or becs or polarizability
+    kwargs["compute_becs"] = becs
+    kwargs["compute_polarizability"] = polarizability
+    return kwargs
+
+
 def valid_err_log(
     valid_loss,
     eval_metrics,
@@ -170,6 +209,7 @@ def train(
     output_args: Dict[str, bool],
     device: torch.device,
     log_errors: str,
+    max_num_updates: Optional[int] = None,
     swa: Optional[SWAContainer] = None,
     ema: Optional[ExponentialMovingAverage] = None,
     max_grad_norm: Optional[float] = 10.0,
@@ -182,6 +222,9 @@ def train(
     rank: Optional[int] = 0,
     data_aug_magmom: Optional[bool] = False,
 ):
+    if max_num_updates is not None and max_num_updates <= 0:
+        max_num_updates = None
+
     lowest_loss = np.inf
     valid_loss = np.inf
     patience_counter = 0
@@ -246,7 +289,7 @@ def train(
         if "ScheduleFree" in type(optimizer).__name__:
             optimizer.train()
 
-        train_one_epoch(
+        reached_update_limit = train_one_epoch(
             model=model,
             loss_fn=loss_fn,
             data_loader=train_loader,
@@ -260,12 +303,13 @@ def train(
             distributed=distributed,
             distributed_model=distributed_model,
             rank=rank,
+            max_num_updates=max_num_updates,
         )
         if distributed:
             torch.distributed.barrier()
 
         # Validate
-        if epoch % eval_interval == 0:
+        if epoch % eval_interval == 0 or reached_update_limit:
             model_to_evaluate = (
                 model if distributed_model is None else distributed_model
             )
@@ -359,6 +403,10 @@ def train(
             if exit_now == 1:
                 break
 
+        if reached_update_limit:
+            logging.info("Reached maximum optimizer update limit")
+            break
+
         epoch += 1
 
     logging.info("Training complete")
@@ -378,7 +426,8 @@ def train_one_epoch(
     distributed: bool,
     distributed_model: Optional[DistributedDataParallel] = None,
     rank: Optional[int] = 0,
-) -> None:
+    max_num_updates: Optional[int] = None,
+) -> bool:
     model_to_train = model if distributed_model is None else distributed_model
 
     if isinstance(optimizer, LBFGS):
@@ -398,8 +447,9 @@ def train_one_epoch(
         opt_metrics["epoch"] = epoch
         if rank == 0:
             logger.log(opt_metrics)
+        return False
     else:
-        for batch in data_loader:
+        for update_idx, batch in enumerate(data_loader):
             _, opt_metrics = take_step(
                 model=model_to_train,
                 loss_fn=loss_fn,
@@ -414,6 +464,9 @@ def train_one_epoch(
             opt_metrics["epoch"] = epoch
             if rank == 0:
                 logger.log(opt_metrics)
+            if max_num_updates is not None and update_idx + 1 >= max_num_updates:
+                return True
+    return False
 
 
 def take_step(
@@ -432,20 +485,7 @@ def take_step(
 
     def closure():
         optimizer.zero_grad(set_to_none=True)
-        kwargs = dict(
-            training=True,
-            compute_force=output_args["forces"],
-            compute_virials=output_args["virials"],
-            compute_stress=output_args["stress"],
-        )
-        if output_args.get("magforces", False):
-            kwargs["compute_magforces"] = True
-        if output_args.get("polarization", False):
-            kwargs["compute_polarization"] = True
-        if output_args.get("becs", False):
-            kwargs["compute_becs"] = True
-        if output_args.get("polarizability", False):
-            kwargs["compute_polarizability"] = True
+        kwargs = _model_output_kwargs(batch, output_args, training=True)
         output = model(batch_dict, **kwargs)
         loss = loss_fn(pred=output, ref=batch)
         loss.backward()
@@ -511,23 +551,10 @@ def take_step_lbfgs(
         total_loss = torch.tensor(0.0, device=device)
 
         # Process each batch and then collect the results we pass to the optimizer
-        kwargs = dict(
-            training=True,
-            compute_force=output_args["forces"],
-            compute_virials=output_args["virials"],
-            compute_stress=output_args["stress"],
-        )
-        if output_args.get("magforces", False):
-            kwargs["compute_magforces"] = True
-        if output_args.get("polarization", False):
-            kwargs["compute_polarization"] = True
-        if output_args.get("becs", False):
-            kwargs["compute_becs"] = True
-        if output_args.get("polarizability", False):
-            kwargs["compute_polarizability"] = True
         for batch in data_loader:
             batch = batch.to(device)
             batch_dict = batch.to_dict()
+            kwargs = _model_output_kwargs(batch, output_args, training=True)
             output = model(batch_dict, **kwargs)
             batch_loss = loss_fn(pred=output, ref=batch)
             batch_loss = batch_loss * (batch.num_graphs / total_sample_count)
@@ -604,20 +631,7 @@ def evaluate(
         for batch in data_loader:
             batch = batch.to(device)
             batch_dict = batch.to_dict()
-            kwargs = dict(
-                training=False,
-                compute_force=output_args["forces"],
-                compute_virials=output_args["virials"],
-                compute_stress=output_args["stress"],
-            )
-            if output_args.get("magforces", False):
-                kwargs["compute_magforces"] = True
-            if output_args.get("polarization", False):
-                kwargs["compute_polarization"] = True
-            if output_args.get("becs", False):
-                kwargs["compute_becs"] = True
-            if output_args.get("polarizability", False):
-                kwargs["compute_polarizability"] = True
+            kwargs = _model_output_kwargs(batch, output_args, training=False)
             output = model(batch_dict, **kwargs)
             avg_loss, aux = metrics(batch, output)
     avg_loss, aux = metrics.compute()

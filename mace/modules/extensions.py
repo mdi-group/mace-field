@@ -70,6 +70,16 @@ from .radial import ZBLBasis
 from .utils import get_edge_vectors_and_lengths, get_symmetric_displacement
 
 
+def _active_response_graphs(
+    data: Dict[str, torch.Tensor], key: str, num_graphs: int
+) -> Optional[torch.Tensor]:
+    """Return the graph mask for a response with non-zero target weights."""
+    if key not in data:
+        return None
+    weights = data[key]
+    return torch.any(weights.reshape(num_graphs, -1) != 0, dim=1)
+
+
 def _copy_mace_readout(
     mace_readout: torch.nn.Module,
     change_irrep_out: Optional[str] = None,  # o3.Irreps("1x1o")
@@ -234,6 +244,34 @@ class MACEField(ScaleShiftMACE):
         # Vacuum permittivity (units: e/V/A)
         eps0 = 8.8541878128e-12 / 1.602176634e-19 / 1e10
 
+        polarization_labels = _active_response_graphs(
+            data, "polarization_weight", num_graphs
+        )
+        becs_labels = _active_response_graphs(data, "becs_weight", num_graphs)
+        polarizability_labels = _active_response_graphs(
+            data, "polarizability_weight", num_graphs
+        )
+        response_graph_mask: Optional[torch.Tensor] = None
+        for label_mask in (
+            polarization_labels,
+            becs_labels,
+            polarizability_labels,
+        ):
+            if label_mask is not None:
+                if response_graph_mask is None:
+                    response_graph_mask = label_mask.clone()
+                else:
+                    response_graph_mask = torch.logical_or(
+                        response_graph_mask, label_mask
+                    )
+        if response_graph_mask is not None and not bool(
+            torch.any(response_graph_mask).item()
+        ):
+            # No labels are active in this batch, as in calculator inference.
+            # Keep the unmasked path so explicitly requested responses retain
+            # their historical behavior outside the training loop.
+            response_graph_mask = None
+
         # Atomic energies
         node_e0 = self.atomic_energies_fn(data["node_attrs"])[
             num_atoms_arange, node_heads
@@ -349,18 +387,80 @@ class MACEField(ScaleShiftMACE):
         total_energy = e0 + inter_e
         node_energy = node_e0.clone().double() + node_inter_es.clone().double()
 
+        if compute_polarization or compute_becs or compute_polarizability:
+            # First derivative: P = -dE/dE_field
+            polarization = get_polarization(
+                energy=inter_e,
+                electric_field=electric_field,
+                create_graph=training or compute_becs or compute_polarizability,
+                graph_mask=response_graph_mask,
+            )  # [n_graphs, 3]
+
+            if compute_becs:
+                if polarization.requires_grad:
+                    becs = get_becs(
+                        polarization=polarization,
+                        positions=positions,
+                        create_graph=training,
+                        graph_mask=becs_labels,
+                    )  # [n_nodes, 3, 3]
+                else:
+                    becs = torch.zeros(
+                        positions.shape[0],
+                        3,
+                        3,
+                        device=positions.device,
+                        dtype=positions.dtype,
+                    )
+            else:
+                becs = None
+
+            if compute_polarizability:
+                if polarization.requires_grad:
+                    polarizability = get_polarizability(
+                        polarization=polarization,
+                        electric_field=electric_field,
+                        create_graph=training,
+                        graph_mask=polarizability_labels,
+                    )  # [n_graphs, 3, 3]
+                    polarizability = polarizability / volume.view(-1, 1, 1) / eps0
+                else:
+                    polarizability = torch.zeros(
+                        polarization.shape[0],
+                        3,
+                        3,
+                        device=polarization.device,
+                        dtype=polarization.dtype,
+                    )
+            else:
+                polarizability = None
+
+            # Always scale P by volume for final output
+            polarization = polarization / volume.view(-1, 1)
+            if not training:
+                # The response values are complete at this point.  Do not
+                # retain their higher-order graph during evaluation.
+                polarization = polarization.detach()
+                if becs is not None:
+                    becs = becs.detach()
+                if polarizability is not None:
+                    polarizability = polarizability.detach()
+        else:
+            polarization = None
+            becs = None
+            polarizability = None
+
         forces, virials, stress, hessian, edge_forces, _ = get_outputs(
             energy=inter_e,
             positions=positions,
             displacement=displacement,
             vectors=vectors,
             cell=cell,
-            training=(
-                training
-                or compute_polarization
-                or compute_becs
-                or compute_polarizability
-            ),
+            # Response derivatives need a graph for their own autograd calls,
+            # but evaluation does not need force/stress derivatives to remain
+            # differentiable.  Keeping this tied to ``training`` avoids
+            # retaining a large force graph for BEC/polarizability inference.
+            training=training,
             compute_force=compute_force,
             compute_virials=compute_virials,
             compute_stress=compute_stress,
@@ -379,55 +479,6 @@ class MACEField(ScaleShiftMACE):
                 batch=data["batch"],
                 cell=cell,
             )
-
-        if compute_polarization or compute_becs or compute_polarizability:
-            # First derivative: P = -dE/dE_field
-            polarization = get_polarization(
-                energy=inter_e,
-                electric_field=electric_field,
-            )  # [n_graphs, 3]
-
-            if compute_becs:
-                if polarization.requires_grad:
-                    becs = get_becs(
-                        polarization=polarization,
-                        positions=positions,
-                    )  # [n_nodes, 3, 3]
-                else:
-                    becs = torch.zeros(
-                        positions.shape[0],
-                        3,
-                        3,
-                        device=positions.device,
-                        dtype=positions.dtype,
-                    )
-            else:
-                becs = None
-
-            if compute_polarizability:
-                if polarization.requires_grad:
-                    polarizability = get_polarizability(
-                        polarization=polarization,
-                        electric_field=electric_field,
-                    )  # [n_graphs, 3, 3]
-                    polarizability = polarizability / volume.view(-1, 1, 1) / eps0
-                else:
-                    polarizability = torch.zeros(
-                        polarization.shape[0],
-                        3,
-                        3,
-                        device=polarization.device,
-                        dtype=polarization.dtype,
-                    )
-            else:
-                polarizability = None
-
-            # Always scale P by volume for final output
-            polarization = polarization / volume.view(-1, 1)
-        else:
-            polarization = None
-            becs = None
-            polarizability = None
 
         return {
             "energy": total_energy,
