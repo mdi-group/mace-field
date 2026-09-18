@@ -195,6 +195,7 @@ def collect(output: Path, *, chunks: int | None, dielectric_as_polarizability: b
             "Energy, forces, and stress are retained only when present on the same API document.",
             "Symmetry-reduced Born charges are not expanded; only complete atom-wise arrays are labelled.",
             "MP dielectric tensors are metadata by default; use --dielectric-as-polarizability only after validating the training-unit convention.",
+            "The raw union may include phonon records without BEC or dielectric labels; the cleaning stage removes response-free MP-Dielectric frames from training.",
         ],
     )
     write_json(MANIFEST_DIR / "MP-Dielectric.json", manifest)

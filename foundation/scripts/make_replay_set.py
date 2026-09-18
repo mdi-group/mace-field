@@ -7,7 +7,16 @@ from pathlib import Path
 
 import numpy as np
 
-from common import DATA_DIR, MANIFEST_DIR, ensure_workspace, manifest_for, read_frames, write_json, write_frames
+from common import (
+    DATA_DIR,
+    MANIFEST_DIR,
+    ensure_workspace,
+    manifest_for,
+    read_frames,
+    sha256,
+    write_json,
+    write_frames,
+)
 
 
 DEFAULT_INPUTS = (
@@ -41,7 +50,15 @@ def _strip_labels(atoms):
     return atoms
 
 
-def collect(inputs: list[Path], output: Path, *, samples: int | None, seed: int, validation_fraction: float) -> dict:
+def collect(
+    inputs: list[Path],
+    output: Path,
+    *,
+    samples: int | None,
+    seed: int,
+    validation_fraction: float,
+    manifest_path: Path | None = None,
+) -> dict:
     ensure_workspace()
     frames = []
     source_counts = {}
@@ -60,13 +77,24 @@ def collect(inputs: list[Path], output: Path, *, samples: int | None, seed: int,
     selected = [frames[index] for index in order]
     for index, atoms in enumerate(selected):
         atoms.info["replay_source_index"] = int(index)
-    written = write_frames(output, selected)
+
     valid_count = 0
+    valid_path = None
     if validation_fraction > 0 and len(selected) > 1:
         valid_count = max(1, int(round(len(selected) * validation_fraction)))
         valid_count = min(valid_count, len(selected) - 1)
         valid_path = output.with_name(output.stem + "_valid" + output.suffix)
-        write_frames(valid_path, selected[:valid_count])
+        validation_frames = selected[:valid_count]
+        train_frames = selected[valid_count:]
+        write_frames(valid_path, validation_frames)
+    else:
+        train_frames = selected
+
+    # Keep the replay validation set strictly disjoint from the replay train
+    # set.  The old implementation wrote all selected frames to `output` and
+    # then duplicated the first validation frames into the sidecar file,
+    # making replay validation metrics invalid.
+    written = write_frames(output, train_frames)
     manifest = manifest_for(
         dataset="MACE-MH-1 replay",
         output=output,
@@ -76,10 +104,15 @@ def collect(inputs: list[Path], output: Path, *, samples: int | None, seed: int,
         notes=[
             "All source target labels are removed; run_train generates E/F/(optional stress) pseudolabels from the plain MACE-MH-1 foundation model.",
             f"Deterministic permutation seed: {seed}.",
-            f"Validation frames written separately: {valid_count}.",
+            f"Validation frames written separately and excluded from training: {valid_count}.",
         ],
     )
-    write_json(MANIFEST_DIR / "mh1_replay.json", manifest)
+    manifest["train_frames"] = written
+    manifest["validation_frames"] = valid_count
+    if valid_path is not None:
+        manifest["validation_output"] = str(valid_path)
+        manifest["validation_sha256"] = sha256(valid_path)
+    write_json(manifest_path or MANIFEST_DIR / "mh1_replay.json", manifest)
     return manifest
 
 

@@ -22,6 +22,9 @@ from common import DATA_DIR, MANIFEST_DIR, ensure_workspace, read_frames, write_
 
 LABELS = ("energy", "forces", "stress", "polarization", "becs", "polarizability")
 POLARIZATION_KEYS = ("REF_polarization", "REF_total_polarisation", "REF_total_polarization")
+REQUIRED_LABELS_BY_DATASET = {
+    "MP-Dielectric.xyz": ("becs", "polarizability"),
+}
 UNITS = {
     "energy": "eV per structure",
     "forces": "eV/Angstrom",
@@ -89,9 +92,12 @@ def _check_frame(
     max_polarization: float,
     max_polarizability: float,
     max_response_atoms: int,
+    required_labels: tuple[str, ...] = (),
 ) -> tuple[list[str], float | None, dict[str, np.ndarray | None]]:
     values = _labels(atoms)
     reasons: list[str] = []
+    if required_labels and not any(values[label] is not None for label in required_labels):
+        reasons.append("missing_required_response_labels")
     if len(atoms) > max_response_atoms and (
         values["becs"] is not None or values["polarizability"] is not None
     ):
@@ -185,6 +191,7 @@ def clean_dataset(
     max_polarization: float,
     max_polarizability: float,
     max_response_atoms: int,
+    required_labels: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     frames = read_frames(path)
     kept = []
@@ -204,6 +211,7 @@ def clean_dataset(
             max_polarization=max_polarization,
             max_polarizability=max_polarizability,
             max_response_atoms=max_response_atoms,
+            required_labels=required_labels,
         )
         if asr_residual is not None:
             asr_values_seen.append(asr_residual)
@@ -247,6 +255,13 @@ def clean_dataset(
         "units": UNITS,
         "notes": [
             "Labels are retained only when finite and shape-valid; no labels are fabricated or matched across structures.",
+            (
+                "At least one valid label is required from: "
+                + ", ".join(required_labels)
+                + "."
+                if required_labels
+                else "No dataset-specific response-label requirement was applied."
+            ),
             f"BEC acoustic sum rule threshold: max absolute atom-sum <= {asr_tolerance} e.",
             f"Response-labeled structures over {max_response_atoms} atoms are excluded from the training copy to fit second derivatives in 24 GB GPU memory.",
             "Energy/force/stress response matches are counted only when present on the same extxyz frame.",
@@ -293,6 +308,7 @@ def main() -> None:
                 max_polarization=args.max_polarization,
                 max_polarizability=args.max_polarizability,
                 max_response_atoms=args.max_response_atoms,
+                required_labels=REQUIRED_LABELS_BY_DATASET.get(path.name, ()),
             )
         )
     write_json(args.manifest, {"datasets": summaries, "units": UNITS})

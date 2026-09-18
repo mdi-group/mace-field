@@ -38,10 +38,11 @@ frame counts, label counts, source URLs, and a SHA-256 checksum.
 
 - `MP-Dielectric.xyz` combines Materials Project dielectric and phonon API
   records. Complete atom-wise BECs and `εr - I` polarizability are retained;
-  E/F/stress are retained only when present on that same API document. The MP
-  task API exposes metadata and parsed output, but does not expose a public
-  OUTCAR file tree. `audit_mp_tasks.py` records the fields returned for task
-  pages such as `aaadjozp` and the current `MPRester.get_download_info` result.
+  frames with neither response label are removed; E/F/stress are retained only
+  when present on that same API document. The MP task API exposes metadata and
+  parsed output, but does not expose a public OUTCAR file tree.
+  `audit_mp_tasks.py` records the fields returned for task pages such as
+  `aaadjozp` and the current `MPRester.get_download_info` result.
 - `MP-ferroelectric.xyz` reads the MPContribs `ferroelectrics` project. Its
   `workflow.json.gz` attachments contain the matching pymatgen structures,
   energies, forces, stresses, and same-branch Berry polarization. These exact
@@ -88,6 +89,7 @@ python foundation/scripts/audit_mp_tasks.py
 python foundation/scripts/clean_validate_datasets.py
 python foundation/scripts/validate_datasets.py foundation/data/cleaned/*.xyz foundation/data/cleaned/*.extxyz \
   --output foundation/manifests/cleaned_shape_summary.json
+python foundation/scripts/make_branch_splits.py
 python foundation/scripts/make_replay_set.py
 ```
 
@@ -117,8 +119,10 @@ rejects non-finite or malformed labels, extreme values, and BECs whose maximum
 absolute acoustic sum-rule residual exceeds `0.25 e` by default. Its manifest
 also records units, per-label counts, same-frame E/F/stress-to-response
 co-occurrence, and correlations of per-frame label norms; these correlations
-are diagnostics, not cross-structure label matching. The training config and
-replay builder prefer these cleaned copies automatically.
+are diagnostics, not cross-structure label matching. For MP-Dielectric, at
+least one valid BEC or polarizability label is required, so response-free
+frames cannot enter training. The training config and replay builder prefer
+these cleaned copies automatically.
 
 Response-labeled structures over 128 atoms are excluded from the cleaned
 training copies. MACE-MH-1-sized response heads require differentiable second
@@ -126,11 +130,25 @@ derivatives for BECs and polarizabilities, and this bound keeps the default
 four-GPU run within 24 GB per GPU at batch size two. Raw source files and their
 manifests remain available for a less conservative downstream policy.
 
+`make_branch_splits.py` creates disjoint train/validation files under
+`foundation/data/branch_splits/` for the two correlated ferroelectric sources.
+For MP-ferroelectric it groups by `source_contribution_id` and holds out one
+seeded random workflow from the interior of each branch. For finite-field data
+it groups by material and polar/nonpolar branch and holds out one seeded random
+interior field value. Endpoints remain in training. Every branch therefore
+remains represented in both training and validation without making validation
+larger than necessary. If the selected workflow is duplicated in the source,
+one copy is retained for validation and the extra identical copies are
+excluded from both partitions to prevent leakage. The other heads continue to
+use deterministic 5% random validation fractions.
+
 `make_replay_set.py` removes source target fields and creates the deterministic
-`foundation/data/mh1_replay.xyz` and `mh1_replay_valid.xyz`. The replay head is
-structure-only at input time: MACE-MH-1 supplies E/F/(optional stress)
-pseudolabels. A plain MACE-MH-1 source cannot generate field responses, so real
-polarization/BEC/polarizability labels must come from the field-capable heads.
+`foundation/data/mh1_replay.xyz` and `mh1_replay_valid.xyz`. The validation
+frames are removed from the replay training file, so the two replay files are
+strictly disjoint. The replay head is structure-only at input time: MACE-MH-1
+supplies E/F/(optional stress) pseudolabels. A plain MACE-MH-1 source cannot
+generate field responses, so real polarization/BEC/polarizability labels must
+come from the field-capable heads.
 
 ## Four-GPU fine-tuning
 
@@ -142,21 +160,32 @@ MACE_MAX_EPOCHS=2048 \
 bash foundation/run_mh1_macefield_4gpu.sh
 ```
 
+The production configuration `foundation/configs/mh1_macefield_heads.yaml`
+uses the generated disjoint branch splits for MP-ferroelectric and
+finite-field-ferroelectric, and holds out a deterministic 5% validation split
+for the other heads. The replay defaults are the complete `mh1_replay.xyz` and
+`mh1_replay_valid.xyz` files, so pseudolabel replay is also full-sized by
+default.
+
+The separate
+`foundation/configs/mh1_macefield_heads_smoke.yaml` configuration uses the
+small four-frame validation files and is intended only for checking model
+construction and response derivatives. Select it explicitly with
+`MACEFIELD_CONFIG=foundation/configs/mh1_macefield_heads_smoke.yaml`.
+
 The launcher selects `omat_pbe` from the `mh-1` foundation, constructs a
 `MACEField` model with `universal_field`, enables all response outputs, and
 uses MACE-MH-1 only for plain replay pseudolabels. Additional
 `mace.cli.run_train` options can be appended to the script. For a memory
 smoke test, run one epoch first with `MACE_MAX_EPOCHS=1`; the launcher defaults
-to batch size two with an atom budget and exposes `MACE_BATCH_SIZE`,
-`MACE_VALID_BATCH_SIZE`, and `MACE_MAX_ATOMS_PER_BATCH` for further tuning.
+to batch size two and exposes `MACE_BATCH_SIZE` and `MACE_VALID_BATCH_SIZE` for
+further tuning.
 Response computation is gated per batch by active label
 weights, so replay and unrelated E/F/P batches do not build unused BEC or
 polarizability graphs. `PYTORCH_ALLOC_CONF` can be supplied to override the
 allocator default.
-The launcher defaults to training batch size two (validation batch size one)
-with a 288-atom budget.  The atom budget prevents mixed-size response batches
-from exceeding GPU memory; override it with `MACE_MAX_ATOMS_PER_BATCH` when
-running on different hardware.  The configured real heads are:
+The launcher defaults to training batch size two and validation batch size one.
+The configured real heads are:
 
 | Head | Main labels |
 | --- | --- |

@@ -24,6 +24,10 @@ fi
 
 mkdir -p foundation/logs foundation/models foundation/results
 
+MACEFIELD_CONFIG="${MACEFIELD_CONFIG:-foundation/configs/mh1_macefield_heads.yaml}"
+MACE_REPLAY_TRAIN_FILE="${MACE_REPLAY_TRAIN_FILE:-foundation/data/mh1_replay.xyz}"
+MACE_REPLAY_VALID_FILE="${MACE_REPLAY_VALID_FILE:-foundation/data/mh1_replay_valid.xyz}"
+
 # MACE-MH-1 is a plain MACE foundation model.  It supplies replay E/F/stress
 # pseudolabels; field labels come from the real field-capable heads above.
 torchrun \
@@ -38,13 +42,13 @@ torchrun \
   --name=mh1_macefield \
   --model=MACEField \
   --loss=universal_field \
-  --config=foundation/configs/mh1_macefield_heads.yaml \
+  --config="${MACEFIELD_CONFIG}" \
   --foundation_model=mh-1 \
   --foundation_head=omat_pbe \
-  --E0s=foundation \
+  --E0s=estimated \
   --multiheads_finetuning=True \
-  --pt_train_file="${MACE_REPLAY_TRAIN_FILE:-foundation/data/mh1_replay.xyz}" \
-  --pt_valid_file="${MACE_REPLAY_VALID_FILE:-foundation/data/mh1_replay_valid.xyz}" \
+  --pt_train_file="${MACE_REPLAY_TRAIN_FILE}" \
+  --pt_valid_file="${MACE_REPLAY_VALID_FILE}" \
   --pseudolabel_replay=True \
   --pseudolabel_replay_compute_stress=True \
   --compute_forces=True \
@@ -58,16 +62,19 @@ torchrun \
   --polarization_weight=10.0 \
   --becs_weight=100.0 \
   --polarizability_weight=10.0 \
+  --weight_decay="${MACE_WEIGHT_DECAY:-0.0}" \
+  --field_weight_decay="${MACEFIELD_WEIGHT_DECAY:-5e-7}" \
   --default_dtype=float64 \
   --device=cuda \
   --batch_size="${MACE_BATCH_SIZE:-2}" \
   --valid_batch_size="${MACE_VALID_BATCH_SIZE:-1}" \
-  --macefield_max_atoms_per_batch="${MACE_MAX_ATOMS_PER_BATCH:-288}" \
-  --max_num_updates="${MACE_MAX_UPDATES:-0}" \
   --max_num_epochs="${MACE_MAX_EPOCHS:-2048}" \
   --model_dir=foundation/models \
   --checkpoints_dir=foundation/models \
   --results_dir=foundation/results \
   --log_dir=foundation/logs \
   --work_dir=foundation \
+  --clip_grad=1.0 \
+  --ema_decay=0.9999 \
+  --ema \
   "$@"

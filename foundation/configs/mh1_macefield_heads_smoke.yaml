@@ -1,40 +1,41 @@
-# This file is consumed by mace/cli/run_train.py from the repository root.
-# Paths are deliberately relative so the workspace can be moved or archived.
+# Four-frame-per-head smoke configuration.  The production configuration is
+# mh1_macefield_heads.yaml and uses disjoint branch-aware splits for the
+# correlated ferroelectric sources plus deterministic 5% splits elsewhere.
 heads:
   MP-ferroelectric:
-    train_file: foundation/data/branch_splits/MP-ferroelectric_train.extxyz
-    valid_file: foundation/data/branch_splits/MP-ferroelectric_valid.extxyz
+    train_file: foundation/data/cleaned/MP-ferroelectric.xyz
+    valid_file: foundation/data/validation/MP-ferroelectric.extxyz
     info_keys:
       electric_field: REF_electric_field
       polarization: REF_polarization
   finite-field-ferroelectric:
-    train_file: foundation/data/branch_splits/finite-field-ferroelectric_train.extxyz
-    valid_file: foundation/data/branch_splits/finite-field-ferroelectric_valid.extxyz
+    train_file: foundation/data/cleaned/finite-field-ferroelectric.extxyz
+    valid_file: foundation/data/validation/finite-field-ferroelectric.extxyz
     info_keys:
       electric_field: REF_electric_field
       polarization: REF_total_polarisation
   C2DB:
     train_file: foundation/data/cleaned/C2DB.xyz
-    valid_fraction: 0.05
+    valid_file: foundation/data/validation/C2DB.extxyz
     arrays_keys:
       becs: REF_becs
   MP-Dielectric:
     train_file: foundation/data/cleaned/MP-Dielectric.xyz
-    valid_fraction: 0.05
+    valid_file: foundation/data/validation/MP-Dielectric.extxyz
     info_keys:
       polarizability: REF_polarizability
     arrays_keys:
       becs: REF_becs
   JarvisDB:
     train_file: foundation/data/cleaned/JarvisDB.xyz
-    valid_fraction: 0.05
+    valid_file: foundation/data/validation/JarvisDB.extxyz
     info_keys:
       polarizability: REF_polarizability
     arrays_keys:
       becs: REF_becs
   Togo:
     train_file: foundation/data/cleaned/Togo.xyz
-    valid_fraction: 0.05
+    valid_file: foundation/data/validation/Togo.extxyz
     info_keys:
       polarizability: REF_polarizability
     arrays_keys:
