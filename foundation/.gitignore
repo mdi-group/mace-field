@@ -1,0 +1,9 @@
+data/
+manifests/*.json
+.cache/
+logs/
+models/
+results/
+*.part
+__pycache__/
+*_valid_indices_*.txt
