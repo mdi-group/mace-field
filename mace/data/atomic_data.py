@@ -293,7 +293,7 @@ class AtomicData(torch_geometric.data.Data):
                 dtype=torch.get_default_dtype(),
             )
             if config.property_weights.get("polarization") is not None
-            else torch.tensor([[1.0, 1.0, 1.0]], dtype=torch.get_default_dtype())
+            else torch.zeros((1, 3), dtype=torch.get_default_dtype())
         )
         if len(polarization_weight.shape) == 0:
             polarization_weight = polarization_weight * torch.ones(
@@ -308,7 +308,7 @@ class AtomicData(torch_geometric.data.Data):
                 dtype=torch.get_default_dtype(),
             )
             if config.property_weights.get("becs") is not None
-            else torch.ones((1, 3, 3), dtype=torch.get_default_dtype())
+            else torch.zeros((1, 3, 3), dtype=torch.get_default_dtype())
         )
         if len(becs_weight.shape) == 0:
             becs_weight = becs_weight * torch.ones(
@@ -331,10 +331,7 @@ class AtomicData(torch_geometric.data.Data):
                 dtype=torch.get_default_dtype(),
             )
             if config.property_weights.get("polarizability") is not None
-            else torch.tensor(
-                [[[1.0, 1.0, 1.0], [1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]],
-                dtype=torch.get_default_dtype(),
-            )
+            else torch.zeros((1, 3, 3), dtype=torch.get_default_dtype())
         )
         if len(polarizability_weight.shape) == 0:
             polarizability_weight = polarizability_weight * torch.tensor(

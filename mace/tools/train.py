@@ -94,15 +94,40 @@ def valid_err_log(
     epoch=None,
     valid_loader_name="Default",
 ):
-    eval_metrics["mode"] = "eval"
-    eval_metrics["epoch"] = epoch
-    eval_metrics["head"] = valid_loader_name
-    logger.log(eval_metrics)
+    # Keep the scalar validation objective alongside the full error record.
+    # The text log already displayed it, but the JSONL metrics stream did not
+    # expose whether a record was an optimizer loss or a validation loss.
+    eval_record = dict(eval_metrics)
+    eval_record["valid_loss"] = valid_loss
+    eval_record["mode"] = "eval"
+    eval_record["epoch"] = epoch
+    eval_record["head"] = valid_loader_name
+    logger.log(eval_record)
     if epoch is None:
         inintial_phrase = "Initial"
     else:
         inintial_phrase = f"Epoch {epoch}"
-    if log_errors == "PerAtomRMSE":
+    if log_errors == "PerAtomFieldRMSE":
+        # Field models use a dedicated error table.  This branch is kept in
+        # the per-epoch path as well as in tables_utils so training logs show
+        # the same quantities that are reported at the end of a run.
+        error_e = eval_metrics["rmse_e_per_atom"] * 1e3
+        error_f = eval_metrics["rmse_f"] * 1e3
+        error_stress = eval_metrics["rmse_stress"] * 1e3
+        error_polarization = eval_metrics["rmse_polarization"] * 1e3
+        error_becs = eval_metrics["rmse_becs"]
+        error_polarizability = eval_metrics["rmse_polarizability"]
+        logging.info(
+            f"{inintial_phrase}: head: {valid_loader_name}, "
+            f"loss={valid_loss:8.8f}, "
+            f"RMSE_E_per_atom={error_e:8.2f} meV, "
+            f"RMSE_F={error_f:8.2f} meV / A, "
+            f"RMSE_stress={error_stress:8.2f} meV / A^3, "
+            f"RMSE_polarization={error_polarization:8.2f} me|e| / A^2, "
+            f"RMSE_BECs={error_becs:8.2f} |e|, "
+            f"RMSE_polarizability={error_polarizability:8.2f} eps0"
+        )
+    elif log_errors == "PerAtomRMSE":
         error_e = eval_metrics["rmse_e_per_atom"] * 1e3
         error_f = eval_metrics["rmse_f"] * 1e3
         logging.info(
@@ -209,7 +234,6 @@ def train(
     output_args: Dict[str, bool],
     device: torch.device,
     log_errors: str,
-    max_num_updates: Optional[int] = None,
     swa: Optional[SWAContainer] = None,
     ema: Optional[ExponentialMovingAverage] = None,
     max_grad_norm: Optional[float] = 10.0,
@@ -222,9 +246,6 @@ def train(
     rank: Optional[int] = 0,
     data_aug_magmom: Optional[bool] = False,
 ):
-    if max_num_updates is not None and max_num_updates <= 0:
-        max_num_updates = None
-
     lowest_loss = np.inf
     valid_loss = np.inf
     patience_counter = 0
@@ -289,7 +310,7 @@ def train(
         if "ScheduleFree" in type(optimizer).__name__:
             optimizer.train()
 
-        reached_update_limit = train_one_epoch(
+        train_one_epoch(
             model=model,
             loss_fn=loss_fn,
             data_loader=train_loader,
@@ -303,13 +324,12 @@ def train(
             distributed=distributed,
             distributed_model=distributed_model,
             rank=rank,
-            max_num_updates=max_num_updates,
         )
         if distributed:
             torch.distributed.barrier()
 
         # Validate
-        if epoch % eval_interval == 0 or reached_update_limit:
+        if epoch % eval_interval == 0:
             model_to_evaluate = (
                 model if distributed_model is None else distributed_model
             )
@@ -341,11 +361,12 @@ def train(
                             wandb_log_dict[valid_loader_name] = {
                                 "epoch": epoch,
                                 "valid_loss": valid_loss_head,
-                                "valid_rmse_e_per_atom": eval_metrics[
-                                    "rmse_e_per_atom"
-                                ],
-                                "valid_rmse_f": eval_metrics["rmse_f"],
                             }
+                            for metric_name, metric_value in eval_metrics.items():
+                                if metric_name not in {"mode", "epoch", "head"}:
+                                    wandb_log_dict[valid_loader_name][
+                                        f"valid_{metric_name}"
+                                    ] = metric_value
                 if plotter and epoch % plotter.plot_frequency == 0:
                     try:
                         plotter.plot(epoch, model_to_evaluate, rank)
@@ -403,10 +424,6 @@ def train(
             if exit_now == 1:
                 break
 
-        if reached_update_limit:
-            logging.info("Reached maximum optimizer update limit")
-            break
-
         epoch += 1
 
     logging.info("Training complete")
@@ -426,8 +443,7 @@ def train_one_epoch(
     distributed: bool,
     distributed_model: Optional[DistributedDataParallel] = None,
     rank: Optional[int] = 0,
-    max_num_updates: Optional[int] = None,
-) -> bool:
+) -> None:
     model_to_train = model if distributed_model is None else distributed_model
 
     if isinstance(optimizer, LBFGS):
@@ -464,9 +480,6 @@ def train_one_epoch(
             opt_metrics["epoch"] = epoch
             if rank == 0:
                 logger.log(opt_metrics)
-            if max_num_updates is not None and update_idx + 1 >= max_num_updates:
-                return True
-    return False
 
 
 def take_step(

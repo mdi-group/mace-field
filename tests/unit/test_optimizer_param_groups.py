@@ -76,6 +76,14 @@ def build_energy_dipoles_mace() -> torch.nn.Module:
     return modules.EnergyDipolesMACE(**COMMON_MODEL_KWARGS)
 
 
+def build_macefield() -> torch.nn.Module:
+    return modules.MACEField(
+        **COMMON_MODEL_KWARGS,
+        atomic_inter_scale=1.0,
+        atomic_inter_shift=0.0,
+    )
+
+
 MODEL_BUILDERS = {
     "MACE": build_mace,
     "ScaleShiftMACE": build_scale_shift_mace,
@@ -153,3 +161,42 @@ def test_unregistered_submodule_raises() -> None:
 
     with pytest.raises(ValueError, match="unregistered_test_module"):
         get_params_options(_training_args(), model)
+
+
+def test_macefield_from_scratch_keeps_backbone_decay() -> None:
+    model = build_macefield()
+    args = _training_args()
+    param_options = get_params_options(args, model)
+
+    groups = {group["name"]: group for group in param_options["params"]}
+    assert groups["embedding"]["weight_decay"] == 0.0
+    assert groups["interactions_decay"]["weight_decay"] == args.weight_decay
+    assert groups["products"]["weight_decay"] == args.weight_decay
+    assert groups["readouts"]["weight_decay"] == 0.0
+    assert groups["field_feats"]["weight_decay"] == args.weight_decay
+    assert groups["field_linear"]["weight_decay"] == args.weight_decay
+
+
+def test_macefield_foundation_finetuning_disables_backbone_decay() -> None:
+    model = build_macefield()
+    args = _training_args()
+    args.macefield_foundation_finetuning = True
+    param_options = get_params_options(args, model)
+
+    groups = {group["name"]: group for group in param_options["params"]}
+    assert groups["interactions_decay"]["weight_decay"] == 0.0
+    assert groups["products"]["weight_decay"] == 0.0
+    assert groups["field_feats"]["weight_decay"] == args.weight_decay
+    assert groups["field_linear"]["weight_decay"] == args.weight_decay
+
+
+def test_macefield_field_weight_decay_can_be_overridden() -> None:
+    model = build_macefield()
+    args = _training_args()
+    args.field_weight_decay = 2e-6
+    param_options = get_params_options(args, model)
+
+    groups = {group["name"]: group for group in param_options["params"]}
+    assert groups["interactions_decay"]["weight_decay"] == args.weight_decay
+    assert groups["field_feats"]["weight_decay"] == args.field_weight_decay
+    assert groups["field_linear"]["weight_decay"] == args.field_weight_decay

@@ -7,7 +7,11 @@ from e3nn import o3
 
 from mace import modules
 from mace.modules.wrapper_ops import CuEquivarianceConfig
-from mace.tools.finetuning_utils import load_foundations_elements, load_foundations_mdp
+from mace.tools.finetuning_utils import (
+    is_mace_foundation_model,
+    load_foundations_elements,
+    load_foundations_mdp,
+)
 from mace.tools.scripts_utils import extract_config_mace_model, resolve_m_max
 from mace.tools.torch_tools import dtype_dict
 from mace.tools.utils import AtomicNumberTable
@@ -124,6 +128,7 @@ def configure_model(
         if args.model in (
             "ScaleShiftMACE",
             "PolarMACE",
+            "MACEField",
             "MagneticScaleShiftMACE",
         ) or model_foundation.__class__.__name__ in (
             "ScaleShiftMACE",
@@ -217,6 +222,15 @@ def configure_model(
         model_config_foundation = None
 
     model = _build_model(args, model_config, model_config_foundation, heads)
+
+    # This flag is intentionally narrower than "is a MACEField model":
+    # from-scratch MACEField training must retain the normal backbone decay,
+    # while MACE -> MACEField transfer uses the special foundation policy.
+    args.macefield_foundation_finetuning = (
+        modules.is_macefield_model(model)
+        and model_foundation is not None
+        and is_mace_foundation_model(model_foundation)
+    )
 
     if model_foundation is not None:
         if getattr(args, "finetune_dipoles_polarizabilities", False):
@@ -477,7 +491,11 @@ def _build_model(
             interaction_cls_first=modules.interaction_classes[args.interaction_first],
             MLP_irreps=o3.Irreps(args.MLP_irreps),
             atomic_inter_scale=args.std,
-            atomic_inter_shift=[0.0] * len(heads),
+            # MACEField predicts the field-dependent interaction energy on
+            # top of the same per-atom baseline as ScaleShiftMACE.  Using a
+            # zero shift here silently leaves extensive reference energies
+            # (hundreds of eV/atom) outside the model's output range.
+            atomic_inter_shift=_determine_atomic_inter_shift(args.mean, heads),
             radial_MLP=ast.literal_eval(args.radial_MLP),
             radial_type=args.radial_type,
             heads=heads,

@@ -294,11 +294,12 @@ def plot_epoch_dependence(
             main_ax.spines.right.set_position(("outward", 60 * (i - 1)))
             twin_axes.append(main_ax)
 
+        scale = 1.0 if key in {"rmse_becs", "rmse_polarizability"} else 1e3
         main_ax.plot(
             valid_data["epoch"],
-            valid_data[key]["mean"] * 1e3,
+            valid_data[key]["mean"] * scale,
             color=color,
-            label=label,
+            label=axis_label,
             linewidth=1,
         )
         main_ax.set_yscale("log")

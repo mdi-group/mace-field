@@ -1,4 +1,5 @@
 import argparse
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -23,7 +24,7 @@ from mace.data import HDF5Dataset, save_dataset_as_HDF5
 from mace.modules import MACEField, interaction_classes, is_macefield_model
 from mace.modules.models import ScaleShiftMACE
 from mace.modules.utils import get_edge_vectors_and_lengths
-from mace.cli.visualise_train import model_inference
+from mace.cli.visualise_train import TrainingPlotter, model_inference
 from mace.tools.multihead_tools import (
     HeadConfig,
     apply_pseudolabels_to_pt_head_configs,
@@ -1335,7 +1336,7 @@ def test_macefield_atomic_data_hdf5_round_trip(tmp_path, field_fitting_configs):
 
 
 def test_macefield_visualisation_reports_weighted_field_metrics(
-    field_fitting_configs,
+    field_fitting_configs, tmp_path
 ):
     """The training scatter workflow includes all three field responses."""
     config = data.config_from_atoms(
@@ -1369,6 +1370,48 @@ def test_macefield_visualisation_reports_weighted_field_metrics(
     assert {"polarization", "becs", "polarizability"} <= set(result)
     for key in ("polarization", "becs", "polarizability"):
         assert result[key]["reference"].shape == result[key]["predicted"].shape
+
+    results_path = tmp_path / "macefield_train.txt"
+    results_path.write_text(
+        "\n".join(
+            json.dumps(record)
+            for record in (
+                {"mode": "opt", "epoch": 0, "loss": 1.0},
+                {
+                    "mode": "eval",
+                    "epoch": 0,
+                    "head": "Default",
+                    "loss": 1.0,
+                    "rmse_e_per_atom": 0.1,
+                    "rmse_f": 0.2,
+                    "rmse_polarization": 0.3,
+                    "rmse_becs": 0.4,
+                    "rmse_polarizability": 0.5,
+                },
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    plotter = TrainingPlotter(
+        results_dir=str(results_path),
+        heads=["Default"],
+        table_type="PerAtomFieldRMSE",
+        train_valid_data={"train_Default": loader},
+        test_data={},
+        output_args={
+            "forces": False,
+            "virials": False,
+            "stress": False,
+            "polarization": True,
+            "becs": True,
+            "polarizability": True,
+        },
+        device="cpu",
+        plot_frequency=0,
+    )
+    plotter.plot(0, model, 0)
+    assert (tmp_path / "macefield_train_Default_stage_one.png").is_file()
 
 
 def test_active_learning_saves_field_response_outputs(tmp_path):
@@ -1470,6 +1513,10 @@ def test_macefield_lammps_mliap_wrapper_injects_constant_field():
 
 
 @pytest.mark.cueq
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CuEq tensor-product kernels require a CUDA runtime",
+)
 def test_macefield_cueq_preserves_field_responses():
     """CuEq conversion preserves energy and all field response tensors."""
     with default_dtype(torch.float64):

@@ -1041,6 +1041,15 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         "--weight_decay", help="weight decay (L2 penalty)", type=float, default=5e-7
     )
     parser.add_argument(
+        "--field_weight_decay",
+        help=(
+            "weight decay for the trainable MACEField response-coupling "
+            "modules; defaults to --weight_decay"
+        ),
+        type=float,
+        default=None,
+    )
+    parser.add_argument(
         "--lr_params_factors",
         help="Learning rate factors to multiply on the original lr",
         type=str,

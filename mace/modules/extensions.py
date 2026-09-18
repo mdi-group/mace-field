@@ -33,9 +33,12 @@ from mace.modules.blocks import (
 from mace.modules.embeddings import GenericJointEmbedding
 from mace.modules.models import ScaleShiftMACE
 from mace.modules.utils import (
+    compute_forces_polarization,
+    compute_forces_virials_polarization,
     compute_total_charge_dipole_permuted,
     get_atomic_virials_stresses,
-    get_becs,
+    get_becs_and_polarizability,
+    get_becs_from_force_field,
     get_outputs,
     get_polarizability,
     get_polarization,
@@ -387,7 +390,58 @@ class MACEField(ScaleShiftMACE):
         total_energy = e0 + inter_e
         node_energy = node_e0.clone().double() + node_inter_es.clone().double()
 
-        if compute_polarization or compute_becs or compute_polarizability:
+        forces: Optional[torch.Tensor] = None
+        virials: Optional[torch.Tensor] = None
+        stress: Optional[torch.Tensor] = None
+        hessian: Optional[torch.Tensor] = None
+        edge_forces: Optional[torch.Tensor] = None
+        response_requested = (
+            compute_polarization or compute_becs or compute_polarizability
+        )
+        use_combined_first_derivatives = (
+            training
+            and response_requested
+            and (compute_force or compute_virials or compute_stress)
+            and (
+                (compute_virials or compute_stress) and displacement is not None
+                or compute_force and not (compute_virials or compute_stress)
+            )
+            and (
+                response_graph_mask is None
+                or bool(torch.all(response_graph_mask).item())
+            )
+            and not compute_hessian
+            and not compute_edge_forces
+            and not compute_atomic_stresses
+        )
+
+        if use_combined_first_derivatives:
+            # Forces, virials, and polarization are all first derivatives of
+            # the same energy.  Compute them in one reverse-mode pass.  The
+            # returned polarization retains its graph for BEC/alpha training.
+            if compute_virials or compute_stress:
+                assert displacement is not None
+                forces, virials, stress, polarization = (
+                    compute_forces_virials_polarization(
+                        energy=inter_e,
+                        positions=positions,
+                        displacement=displacement,
+                        electric_field=electric_field,
+                        cell=cell,
+                        create_graph=True,
+                        compute_stress=compute_stress,
+                    )
+                )
+            else:
+                forces, polarization = compute_forces_polarization(
+                    energy=inter_e,
+                    positions=positions,
+                    electric_field=electric_field,
+                    create_graph=True,
+                )
+                virials = None
+                stress = None
+        elif response_requested:
             # First derivative: P = -dE/dE_field
             polarization = get_polarization(
                 energy=inter_e,
@@ -395,47 +449,87 @@ class MACEField(ScaleShiftMACE):
                 create_graph=training or compute_becs or compute_polarizability,
                 graph_mask=response_graph_mask,
             )  # [n_graphs, 3]
+        else:
+            polarization = None
 
-            if compute_becs:
-                if polarization.requires_grad:
-                    becs = get_becs(
+        common_response_mask: Optional[torch.Tensor] = None
+        can_combine_response_derivatives = False
+        if compute_becs and compute_polarizability:
+            if becs_labels is None and polarizability_labels is None:
+                can_combine_response_derivatives = True
+            elif becs_labels is not None and polarizability_labels is not None:
+                can_combine_response_derivatives = torch.equal(
+                    becs_labels, polarizability_labels
+                )
+                if can_combine_response_derivatives:
+                    common_response_mask = becs_labels
+
+        becs: Optional[torch.Tensor] = None
+        polarizability: Optional[torch.Tensor] = None
+        if compute_becs:
+            if polarization is not None and polarization.requires_grad:
+                if can_combine_response_derivatives:
+                    becs, polarizability = get_becs_and_polarizability(
                         polarization=polarization,
+                        positions=positions,
+                        electric_field=electric_field,
+                        create_graph=training,
+                        graph_mask=common_response_mask,
+                    )
+                    polarizability = (
+                        polarizability / volume.view(-1, 1, 1) / eps0
+                    )
+                else:
+                    # Maxwell-equivalent force-field route:
+                    # BEC = dF/dE = -d/dR (dE/dE).  This reverse-mode ordering
+                    # avoids materialising a full force-output Jacobian.
+                    becs = get_becs_from_force_field(
+                        field_gradient=-polarization,
                         positions=positions,
                         create_graph=training,
                         graph_mask=becs_labels,
                     )  # [n_nodes, 3, 3]
-                else:
-                    becs = torch.zeros(
-                        positions.shape[0],
-                        3,
-                        3,
-                        device=positions.device,
-                        dtype=positions.dtype,
-                    )
             else:
-                becs = None
-
-            if compute_polarizability:
-                if polarization.requires_grad:
-                    polarizability = get_polarizability(
-                        polarization=polarization,
-                        electric_field=electric_field,
-                        create_graph=training,
-                        graph_mask=polarizability_labels,
-                    )  # [n_graphs, 3, 3]
-                    polarizability = polarizability / volume.view(-1, 1, 1) / eps0
-                else:
+                becs = torch.zeros(
+                    positions.shape[0],
+                    3,
+                    3,
+                    device=positions.device,
+                    dtype=positions.dtype,
+                )
+                if compute_polarizability and can_combine_response_derivatives:
                     polarizability = torch.zeros(
-                        polarization.shape[0],
+                        num_graphs,
                         3,
                         3,
-                        device=polarization.device,
-                        dtype=polarization.dtype,
+                        device=electric_field.device,
+                        dtype=electric_field.dtype,
                     )
-            else:
-                polarizability = None
+        else:
+            becs = None
 
-            # Always scale P by volume for final output
+        if compute_polarizability and not can_combine_response_derivatives:
+            if polarization is not None and polarization.requires_grad:
+                polarizability = get_polarizability(
+                    polarization=polarization,
+                    electric_field=electric_field,
+                    create_graph=training,
+                    graph_mask=polarizability_labels,
+                )  # [n_graphs, 3, 3]
+                polarizability = polarizability / volume.view(-1, 1, 1) / eps0
+            else:
+                polarizability = torch.zeros(
+                    num_graphs,
+                    3,
+                    3,
+                    device=electric_field.device,
+                    dtype=electric_field.dtype,
+                )
+        elif not compute_polarizability:
+            polarizability = None
+
+        if polarization is not None:
+            # Always scale P by volume for final output.
             polarization = polarization / volume.view(-1, 1)
             if not training:
                 # The response values are complete at this point.  Do not
@@ -445,28 +539,27 @@ class MACEField(ScaleShiftMACE):
                     becs = becs.detach()
                 if polarizability is not None:
                     polarizability = polarizability.detach()
-        else:
-            polarization = None
-            becs = None
-            polarizability = None
 
-        forces, virials, stress, hessian, edge_forces, _ = get_outputs(
-            energy=inter_e,
-            positions=positions,
-            displacement=displacement,
-            vectors=vectors,
-            cell=cell,
-            # Response derivatives need a graph for their own autograd calls,
-            # but evaluation does not need force/stress derivatives to remain
-            # differentiable.  Keeping this tied to ``training`` avoids
-            # retaining a large force graph for BEC/polarizability inference.
-            training=training,
-            compute_force=compute_force,
-            compute_virials=compute_virials,
-            compute_stress=compute_stress,
-            compute_hessian=compute_hessian,
-            compute_edge_forces=compute_edge_forces,
-        )
+        if not use_combined_first_derivatives:
+            forces, virials, stress, hessian, edge_forces, _ = get_outputs(
+                energy=inter_e,
+                positions=positions,
+                displacement=displacement,
+                vectors=vectors,
+                cell=cell,
+                # Response derivatives need a graph for their own autograd
+                # calls, but evaluation does not need force/stress derivatives
+                # to remain differentiable.
+                training=training,
+                compute_force=compute_force,
+                compute_virials=compute_virials,
+                compute_stress=compute_stress,
+                compute_hessian=compute_hessian,
+                compute_edge_forces=compute_edge_forces,
+            )
+        else:
+            hessian = None
+            edge_forces = None
 
         atomic_virials: Optional[torch.Tensor] = None
         atomic_stresses: Optional[torch.Tensor] = None

@@ -981,6 +981,25 @@ def freeze_module(module: torch.nn.Module, freeze: bool = True):
 def get_params_options(
     args: argparse.Namespace, model: torch.nn.Module
 ) -> Dict[str, Any]:
+    is_field_model = modules.is_macefield_model(model)
+    is_macefield_foundation_finetuning = getattr(
+        args, "macefield_foundation_finetuning", False
+    )
+    field_weight_decay = getattr(args, "field_weight_decay", None)
+    if field_weight_decay is None:
+        field_weight_decay = args.weight_decay
+
+    # During MACEField foundation fine-tuning, preserve the pretrained
+    # backbone by disabling decay on the inherited MACE parameters.  The
+    # response-coupling modules are the newly added field-specific degrees of
+    # freedom and retain the requested field decay instead.  Non-MACEField
+    # models keep the historical grouping and decay behavior below.
+    backbone_weight_decay = (
+        0.0
+        if is_field_model and is_macefield_foundation_finetuning
+        else args.weight_decay
+    )
+
     decay_interactions = {}
     no_decay_interactions = {}
     for name, param in model.interactions.named_parameters():
@@ -1020,7 +1039,7 @@ def get_params_options(
             {
                 "name": "interactions_decay",
                 "params": list(decay_interactions.values()),
-                "weight_decay": args.weight_decay,
+                "weight_decay": backbone_weight_decay,
                 "lr": lr_params_factors.get("interactions_lr_factor", 1.0) * args.lr,
             },
             {
@@ -1032,7 +1051,7 @@ def get_params_options(
             {
                 "name": "products",
                 "params": model.products.parameters(),
-                "weight_decay": args.weight_decay,
+                "weight_decay": backbone_weight_decay,
                 "lr": lr_params_factors.get("products_lr_factor", 1.0) * args.lr,
             },
             {
@@ -1065,6 +1084,9 @@ def get_params_options(
         "layer_feature_mixer",
         "field_feats",
         "field_linear",
+        "dipole_head",
+        "polarizability_head",
+        "residual_head",
     ]
     for submodule_name in optional_submodule_names:
         submodule = getattr(model, submodule_name, None)
@@ -1073,11 +1095,22 @@ def get_params_options(
         submodule_parameters = list(submodule.parameters())
         if not submodule_parameters:
             continue
+        is_field_component = submodule_name in {
+            "field_feats",
+            "field_linear",
+            "dipole_head",
+            "polarizability_head",
+            "residual_head",
+        }
         param_options["params"].append(
             {
                 "name": submodule_name,
                 "params": submodule_parameters,
-                "weight_decay": 0.0,
+                "weight_decay": (
+                    field_weight_decay
+                    if is_field_model and is_field_component
+                    else 0.0
+                ),
             }
         )
 

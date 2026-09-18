@@ -80,6 +80,74 @@ def compute_forces_virials(
     return -1 * forces, -1 * virials, stress
 
 
+def compute_forces_virials_polarization(
+    energy: torch.Tensor,
+    positions: torch.Tensor,
+    displacement: torch.Tensor,
+    electric_field: torch.Tensor,
+    cell: torch.Tensor,
+    create_graph: bool = True,
+    compute_stress: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute energy first derivatives for forces, stress, and polarization.
+
+    These quantities are all first derivatives of the same scalar energy.  A
+    single reverse-mode VJP is therefore cheaper than separately differentiating
+    the energy for forces/virials and for polarization.  ``create_graph`` must
+    remain enabled when BECs or polarizability will be differentiated from the
+    returned polarization.
+    """
+    grad_outputs: List[Optional[torch.Tensor]] = [torch.ones_like(energy)]
+    forces, virials, field_gradient = torch.autograd.grad(
+        outputs=[energy],
+        inputs=[positions, displacement, electric_field],
+        grad_outputs=grad_outputs,
+        retain_graph=True,
+        create_graph=create_graph,
+        allow_unused=True,
+    )
+
+    if forces is None:
+        forces = torch.zeros_like(positions)
+    if virials is None:
+        virials = torch.zeros_like(displacement)
+    if field_gradient is None:
+        field_gradient = torch.zeros_like(electric_field)
+
+    stress = torch.zeros_like(displacement)
+    if compute_stress:
+        cell = cell.view(-1, 3, 3)
+        volume = torch.linalg.det(cell).abs().unsqueeze(-1)
+        stress = virials / volume.view(-1, 1, 1)
+        stress = torch.where(torch.abs(stress) < 1e10, stress, torch.zeros_like(stress))
+
+    return -forces, -virials, stress, -field_gradient
+
+
+def compute_forces_polarization(
+    energy: torch.Tensor,
+    positions: torch.Tensor,
+    electric_field: torch.Tensor,
+    create_graph: bool = True,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Compute force and polarization from one energy reverse-mode pass."""
+    grad_outputs: List[Optional[torch.Tensor]] = [torch.ones_like(energy)]
+    forces, field_gradient = torch.autograd.grad(
+        outputs=[energy],
+        inputs=[positions, electric_field],
+        grad_outputs=grad_outputs,
+        retain_graph=True,
+        create_graph=create_graph,
+        allow_unused=True,
+    )
+
+    if forces is None:
+        forces = torch.zeros_like(positions)
+    if field_gradient is None:
+        field_gradient = torch.zeros_like(electric_field)
+    return -forces, -field_gradient
+
+
 def get_symmetric_displacement(
     positions: torch.Tensor,
     unit_shifts: torch.Tensor,
@@ -777,40 +845,492 @@ def get_becs(
     return becs  # [n_nodes, 3, 3]
 
 
+def _is_batched_vjp_runtime_error(error: RuntimeError) -> bool:
+    """Return whether an eager batched-VJP failure has a safe loop fallback."""
+    message = str(error)
+    return (
+        "Batching rule" in message
+        or "vmap" in message
+        or "Cannot access data pointer" in message
+        or "doesn't have storage" in message
+        or "does not have storage" in message
+    )
+
+
+def _get_becs_from_force_field_loop(
+    field_gradient: torch.Tensor,
+    positions: torch.Tensor,
+    create_graph: bool = True,
+    graph_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Compute BECs through the force--field Maxwell relation.
+
+    For the scalar enthalpy ``E(R, field)`` and MACE's force convention,
+
+    ``dF_beta / dfield_alpha = -d/dR_beta (dE / dfield_alpha)``.
+
+    ``field_gradient`` is ``dE / dfield``.  The mixed derivative is evaluated
+    in this reverse-mode ordering because the field has only three components:
+    Three field-component VJPs return all atom-coordinate rows without
+    materialising a full force-output Jacobian.  This is the Maxwell-equivalent
+    ``dF/dfield`` route while keeping the VJP cost proportional to the field
+    output.
+    """
+    if graph_mask is not None:
+        if not bool(torch.any(graph_mask).item()):
+            return torch.zeros(
+                positions.shape[0],
+                3,
+                3,
+                device=positions.device,
+                dtype=positions.dtype,
+            )
+        field_gradient = field_gradient[graph_mask]
+
+    if not field_gradient.requires_grad:
+        return torch.zeros(
+            positions.shape[0],
+            3,
+            3,
+            device=positions.device,
+            dtype=positions.dtype,
+        )
+
+    becs_list: List[torch.Tensor] = []
+    for d in range(3):
+        field_component = field_gradient[:, d]
+        grad_outputs: List[Optional[torch.Tensor]] = [
+            torch.ones_like(field_component)
+        ]
+        gradient = torch.autograd.grad(
+            outputs=[field_component],
+            inputs=[positions],
+            grad_outputs=grad_outputs,
+            retain_graph=True,
+            create_graph=create_graph,
+            allow_unused=True,
+        )[0]
+        if gradient is None:
+            gradient = torch.zeros_like(positions)
+        becs_list.append(gradient)
+    return -torch.stack(becs_list, dim=1)
+
+
+@torch.jit.ignore
+def _get_becs_from_force_field_batched(
+    field_gradient: torch.Tensor,
+    positions: torch.Tensor,
+    create_graph: bool = True,
+    graph_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Eager batched-VJP implementation of the Maxwell BEC route."""
+    if graph_mask is not None:
+        if not bool(torch.any(graph_mask).item()):
+            return torch.zeros(
+                positions.shape[0],
+                3,
+                3,
+                device=positions.device,
+                dtype=positions.dtype,
+            )
+        field_gradient = field_gradient[graph_mask]
+
+    if not field_gradient.requires_grad:
+        return torch.zeros(
+            positions.shape[0],
+            3,
+            3,
+            device=positions.device,
+            dtype=positions.dtype,
+        )
+
+    vjp_seeds = torch.eye(
+        3, device=field_gradient.device, dtype=field_gradient.dtype
+    ).unsqueeze(1)
+    vjp_seeds = vjp_seeds.expand(3, field_gradient.shape[0], 3)
+    try:
+        gradients = torch.autograd.grad(
+            outputs=[field_gradient],
+            inputs=[positions],
+            grad_outputs=[vjp_seeds],
+            retain_graph=True,
+            create_graph=create_graph,
+            allow_unused=True,
+            is_grads_batched=True,
+        )[0]
+    except RuntimeError as error:
+        # Some e3nn/CuEq operations do not yet have batching rules.  Keep the
+        # same VJP formulation, but evaluate its three seed directions
+        # sequentially rather than failing the whole field model.
+        if not _is_batched_vjp_runtime_error(error):
+            raise
+        return _get_becs_from_force_field_loop(
+            field_gradient=field_gradient,
+            positions=positions,
+            create_graph=create_graph,
+            graph_mask=None,
+        )
+    if gradients is None:
+        return torch.zeros(
+            positions.shape[0],
+            3,
+            3,
+            device=positions.device,
+            dtype=positions.dtype,
+        )
+    return -gradients.permute(1, 0, 2)
+
+
+def get_becs_from_force_field(
+    field_gradient: torch.Tensor,
+    positions: torch.Tensor,
+    create_graph: bool = True,
+    graph_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Compute BECs through the force--field Maxwell relation."""
+    if torch.jit.is_scripting():
+        return _get_becs_from_force_field_loop(
+            field_gradient=field_gradient,
+            positions=positions,
+            create_graph=create_graph,
+            graph_mask=graph_mask,
+        )
+    return _get_becs_from_force_field_batched(
+        field_gradient=field_gradient,
+        positions=positions,
+        create_graph=create_graph,
+        graph_mask=graph_mask,
+    )
+
+
+def _get_becs_and_polarizability_loop(
+    polarization: torch.Tensor,
+    positions: torch.Tensor,
+    electric_field: torch.Tensor,
+    create_graph: bool = True,
+    graph_mask: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Compute BECs and polarizability with memory-bounded VJPs.
+
+    Both quantities are Jacobians of the same three-component polarization.
+    Each seed returns gradients with respect to both inputs in one backward
+    traversal, so the two Jacobians require three traversals instead of the six
+    traversals used when they are evaluated independently.  The seeds are
+    processed sequentially to avoid materialising a leading VJP batch dimension
+    in the saved autograd intermediates.
+    """
+    num_graphs = polarization.shape[0]
+    if graph_mask is not None:
+        if not bool(torch.any(graph_mask).item()):
+            becs_zeros = torch.zeros(
+                positions.shape[0],
+                3,
+                3,
+                device=polarization.device,
+                dtype=polarization.dtype,
+            )
+            polarizability_zeros = torch.zeros(
+                num_graphs,
+                3,
+                3,
+                device=polarization.device,
+                dtype=polarization.dtype,
+            )
+            return becs_zeros, polarizability_zeros
+        polarization = polarization[graph_mask]
+
+    if not polarization.requires_grad:
+        becs_zeros = torch.zeros(
+            positions.shape[0],
+            3,
+            3,
+            device=polarization.device,
+            dtype=polarization.dtype,
+        )
+        polarizability_zeros = torch.zeros(
+            num_graphs,
+            3,
+            3,
+            device=polarization.device,
+            dtype=polarization.dtype,
+        )
+        return becs_zeros, polarizability_zeros
+
+    becs_list: List[torch.Tensor] = []
+    polarizability_list: List[torch.Tensor] = []
+    for d in range(3):
+        grad_outputs: List[Optional[torch.Tensor]] = [
+            torch.ones_like(polarization[:, d])
+        ]
+        gradients = torch.autograd.grad(
+            outputs=[polarization[:, d]],
+            inputs=[positions, electric_field],
+            grad_outputs=grad_outputs,
+            retain_graph=True,
+            create_graph=create_graph,
+            allow_unused=True,
+        )
+        position_gradient = gradients[0]
+        field_gradient = gradients[1]
+        if position_gradient is None:
+            position_gradient = torch.zeros_like(positions)
+        if field_gradient is None:
+            field_gradient = torch.zeros_like(electric_field)
+        becs_list.append(position_gradient)
+        polarizability_list.append(field_gradient)
+
+    becs = torch.stack(becs_list, dim=1)
+    polarizability = torch.stack(polarizability_list, dim=1)
+    return becs, polarizability
+
+
+@torch.jit.ignore
+def _get_becs_and_polarizability_batched(
+    polarization: torch.Tensor,
+    positions: torch.Tensor,
+    electric_field: torch.Tensor,
+    create_graph: bool = True,
+    graph_mask: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Compute both response Jacobians with batched VJPs for inference."""
+    num_graphs = polarization.shape[0]
+    if graph_mask is not None:
+        if not bool(torch.any(graph_mask).item()):
+            becs_zeros = torch.zeros(
+                positions.shape[0],
+                3,
+                3,
+                device=polarization.device,
+                dtype=polarization.dtype,
+            )
+            polarizability_zeros = torch.zeros(
+                num_graphs,
+                3,
+                3,
+                device=polarization.device,
+                dtype=polarization.dtype,
+            )
+            return becs_zeros, polarizability_zeros
+        polarization = polarization[graph_mask]
+
+    if not polarization.requires_grad:
+        becs_zeros = torch.zeros(
+            positions.shape[0],
+            3,
+            3,
+            device=polarization.device,
+            dtype=polarization.dtype,
+        )
+        polarizability_zeros = torch.zeros(
+            num_graphs,
+            3,
+            3,
+            device=polarization.device,
+            dtype=polarization.dtype,
+        )
+        return becs_zeros, polarizability_zeros
+
+    vjp_seeds = torch.eye(
+        3, device=polarization.device, dtype=polarization.dtype
+    ).unsqueeze(1)
+    vjp_seeds = vjp_seeds.expand(3, polarization.shape[0], 3)
+    try:
+        gradients = torch.autograd.grad(
+            outputs=[polarization],
+            inputs=[positions, electric_field],
+            grad_outputs=[vjp_seeds],
+            retain_graph=True,
+            create_graph=create_graph,
+            allow_unused=True,
+            is_grads_batched=True,
+        )
+    except RuntimeError as error:
+        if not _is_batched_vjp_runtime_error(error):
+            raise
+        return _get_becs_and_polarizability_loop(
+            polarization=polarization,
+            positions=positions,
+            electric_field=electric_field,
+            create_graph=create_graph,
+            graph_mask=None,
+        )
+
+    position_gradients = gradients[0]
+    field_gradients = gradients[1]
+    if position_gradients is None:
+        position_gradients = torch.zeros(
+            3,
+            positions.shape[0],
+            3,
+            device=positions.device,
+            dtype=positions.dtype,
+        )
+    if field_gradients is None:
+        field_gradients = torch.zeros(
+            3,
+            electric_field.shape[0],
+            3,
+            device=electric_field.device,
+            dtype=electric_field.dtype,
+        )
+    return position_gradients.permute(1, 0, 2), field_gradients.permute(1, 0, 2)
+
+
+def get_becs_and_polarizability(
+    polarization: torch.Tensor,
+    positions: torch.Tensor,
+    electric_field: torch.Tensor,
+    create_graph: bool = True,
+    graph_mask: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Compute BECs and polarizability from one shared response VJP pass."""
+    if torch.jit.is_scripting() or create_graph:
+        return _get_becs_and_polarizability_loop(
+            polarization=polarization,
+            positions=positions,
+            electric_field=electric_field,
+            create_graph=create_graph,
+            graph_mask=graph_mask,
+        )
+    return _get_becs_and_polarizability_batched(
+        polarization=polarization,
+        positions=positions,
+        electric_field=electric_field,
+        create_graph=create_graph,
+        graph_mask=graph_mask,
+    )
+
+
+def _get_polarizability_loop(
+    polarization: torch.Tensor,
+    electric_field: torch.Tensor,
+    create_graph: bool = True,
+    graph_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    num_graphs = polarization.shape[0]
+    if graph_mask is not None:
+        if not bool(torch.any(graph_mask).item()):
+            return torch.zeros(
+                num_graphs,
+                3,
+                3,
+                device=polarization.device,
+                dtype=polarization.dtype,
+            )
+        polarization = polarization[graph_mask]
+
+    if not polarization.requires_grad:
+        return torch.zeros(
+            num_graphs,
+            3,
+            3,
+            device=polarization.device,
+            dtype=polarization.dtype,
+        )
+
+    polarizability_list: List[torch.Tensor] = []
+    for d in range(3):
+        polar_component = polarization[:, d]
+        grad_outputs: List[Optional[torch.Tensor]] = [
+            torch.ones_like(polar_component)
+        ]
+        grad_field = torch.autograd.grad(
+            outputs=[polar_component],
+            inputs=[electric_field],
+            grad_outputs=grad_outputs,
+            retain_graph=True,
+            create_graph=create_graph,
+            allow_unused=True,
+        )[0]
+        if grad_field is None:
+            grad_field = torch.zeros_like(electric_field)
+        polarizability_list.append(grad_field)
+    return torch.stack(polarizability_list, dim=1)
+
+
+@torch.jit.ignore
+def _get_polarizability_batched(
+    polarization: torch.Tensor,
+    electric_field: torch.Tensor,
+    create_graph: bool = True,
+    graph_mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Eager batched-VJP implementation of the polarizability Jacobian."""
+    num_graphs = polarization.shape[0]
+    if graph_mask is not None:
+        if not bool(torch.any(graph_mask).item()):
+            return torch.zeros(
+                num_graphs,
+                3,
+                3,
+                device=polarization.device,
+                dtype=polarization.dtype,
+            )
+        polarization = polarization[graph_mask]
+
+    if not polarization.requires_grad:
+        return torch.zeros(
+            num_graphs,
+            3,
+            3,
+            device=polarization.device,
+            dtype=polarization.dtype,
+        )
+
+    vjp_seeds = torch.eye(
+        3, device=polarization.device, dtype=polarization.dtype
+    ).unsqueeze(1)
+    vjp_seeds = vjp_seeds.expand(3, polarization.shape[0], 3)
+    try:
+        gradients = torch.autograd.grad(
+            outputs=[polarization],
+            inputs=[electric_field],
+            grad_outputs=[vjp_seeds],
+            retain_graph=True,
+            create_graph=create_graph,
+            allow_unused=True,
+            is_grads_batched=True,
+        )[0]
+    except RuntimeError as error:
+        if not _is_batched_vjp_runtime_error(error):
+            raise
+        return _get_polarizability_loop(
+            polarization=polarization,
+            electric_field=electric_field,
+            create_graph=create_graph,
+            graph_mask=None,
+        )
+    if gradients is None:
+        return torch.zeros(
+            num_graphs,
+            3,
+            3,
+            device=polarization.device,
+            dtype=polarization.dtype,
+        )
+    return gradients.permute(1, 0, 2)  # [n_graphs, output, field]
+
+
 def get_polarizability(
     polarization: torch.Tensor,
     electric_field: torch.Tensor,
     create_graph: bool = True,
     graph_mask: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    # Second derivatives (BEC and polarizability) computed for each polarization component.
-    polarizability_list = []
-    for d in range(3):
-        polar_component = polarization[:, d]  # [n_graphs]
-        if graph_mask is not None:
-            if not bool(torch.any(graph_mask).item()):
-                return torch.zeros(
-                    polarization.shape[0],
-                    3,
-                    3,
-                    device=polarization.device,
-                    dtype=polarization.dtype,
-                )
-            polar_component = polar_component[graph_mask]
-        grad_outputs: List[Optional[torch.Tensor]] = [torch.ones_like(polar_component)]
-        grad_field = torch.autograd.grad(
-            outputs=[polar_component],  # [n_graphs]
-            inputs=[electric_field],  # [n_graphs, 3] or [1, 3]
-            grad_outputs=grad_outputs,
-            retain_graph=True,
+    """Compute polarizability with eager batched VJPs and a script fallback."""
+    if torch.jit.is_scripting():
+        return _get_polarizability_loop(
+            polarization=polarization,
+            electric_field=electric_field,
             create_graph=create_graph,
-            allow_unused=True,  # <- important
-        )[0]
-        if grad_field is None:
-            grad_field = torch.zeros_like(electric_field)
-        polarizability_list.append(grad_field)  # [n_graphs, 3]
-    polarizability = torch.stack(polarizability_list, dim=1)  # [n_graphs, 3, 3]
-    return polarizability  # [n_graphs, 3, 3]
+            graph_mask=graph_mask,
+        )
+    return _get_polarizability_batched(
+        polarization=polarization,
+        electric_field=electric_field,
+        create_graph=create_graph,
+        graph_mask=graph_mask,
+    )
 
 
 class InteractionKwargs(NamedTuple):

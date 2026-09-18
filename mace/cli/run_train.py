@@ -50,9 +50,7 @@ from mace.tools.multihead_tools import (
     prepare_pt_head,
 )
 from mace.tools.run_train_utils import (
-    AtomBudgetBatchSampler,
     combine_datasets,
-    DistributedAtomBudgetBatchSampler,
     load_dataset_for_path,
     normalize_file_paths,
 )
@@ -781,25 +779,14 @@ def run(args) -> None:
     train_set = ConcatDataset([train_sets[head] for head in heads])
     train_sampler, valid_sampler = None, None
     if args.distributed:
-        if args.model == "MACEField" and args.batch_size > 1:
-            train_sampler = DistributedAtomBudgetBatchSampler(
-                dataset=train_set,
-                batch_size=args.batch_size,
-                max_atoms=getattr(args, "macefield_max_atoms_per_batch", 288),
-                num_replicas=world_size,
-                rank=rank,
-                seed=args.seed,
-                drop_last=not args.lbfgs,
-            )
-        else:
-            train_sampler = torch.utils.data.distributed.DistributedSampler(
-                train_set,
-                num_replicas=world_size,
-                rank=rank,
-                shuffle=True,
-                drop_last=(not args.lbfgs),
-                seed=args.seed,
-            )
+        train_sampler = torch.utils.data.distributed.DistributedSampler(
+            train_set,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=True,
+            drop_last=(not args.lbfgs),
+            seed=args.seed,
+        )
         valid_samplers = {}
         for head, valid_set in valid_sets.items():
             valid_sampler = torch.utils.data.distributed.DistributedSampler(
@@ -812,38 +799,16 @@ def run(args) -> None:
             )
             valid_samplers[head] = valid_sampler
 
-    if args.model == "MACEField" and args.batch_size > 1:
-        if args.distributed:
-            train_batch_sampler = train_sampler
-        else:
-            batch_sampler_source = torch.utils.data.RandomSampler(
-                train_set,
-                generator=torch.Generator().manual_seed(args.seed),
-            )
-            train_batch_sampler = AtomBudgetBatchSampler(
-                sampler=batch_sampler_source,
-                dataset=train_set,
-                batch_size=args.batch_size,
-                max_atoms=getattr(args, "macefield_max_atoms_per_batch", 288),
-                drop_last=not args.lbfgs,
-            )
-        train_loader = torch_geometric.dataloader.DataLoader(
-            dataset=train_set,
-            batch_sampler=train_batch_sampler,
-            pin_memory=args.pin_memory,
-            num_workers=args.num_workers,
-        )
-    else:
-        train_loader = torch_geometric.dataloader.DataLoader(
-            dataset=train_set,
-            batch_size=args.batch_size,
-            sampler=train_sampler,
-            shuffle=(train_sampler is None),
-            drop_last=(train_sampler is None and not args.lbfgs),
-            pin_memory=args.pin_memory,
-            num_workers=args.num_workers,
-            generator=torch.Generator().manual_seed(args.seed),
-        )
+    train_loader = torch_geometric.dataloader.DataLoader(
+        dataset=train_set,
+        batch_size=args.batch_size,
+        sampler=train_sampler,
+        shuffle=(train_sampler is None),
+        drop_last=(train_sampler is None and not args.lbfgs),
+        pin_memory=args.pin_memory,
+        num_workers=args.num_workers,
+        generator=torch.Generator().manual_seed(args.seed),
+    )
 
     valid_loaders = {heads[i]: None for i in range(len(heads))}
     if not isinstance(valid_sets, dict):
@@ -895,8 +860,6 @@ def run(args) -> None:
     if args.ema:
         logging.info(f"Using Exponential Moving Average with decay: {args.ema_decay}")
     estimated_updates = int(args.max_num_epochs * len(train_set) / args.batch_size)
-    if args.max_num_updates > 0:
-        estimated_updates = min(estimated_updates, args.max_num_updates)
     logging.info(f"Number of gradient updates: {estimated_updates}")
     logging.info(f"Learning rate: {args.lr}, weight decay: {args.weight_decay}")
     logging.info(loss_fn)
@@ -1078,7 +1041,6 @@ def run(args) -> None:
         eval_interval=args.eval_interval,
         start_epoch=start_epoch,
         max_num_epochs=args.max_num_epochs,
-        max_num_updates=args.max_num_updates,
         logger=logger,
         patience=args.patience,
         save_all_checkpoints=args.save_all_checkpoints,
