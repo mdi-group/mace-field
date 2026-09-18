@@ -55,3 +55,6 @@ htmlcov/
 
 # local planning docs (not for the public repo)
 /doc
+
+# Local feature experiments, datasets, logs, and checkpoints
+/feature/
