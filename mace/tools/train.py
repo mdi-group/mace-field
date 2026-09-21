@@ -735,7 +735,13 @@ class MACELoss(Metric):
         self.add_state("delta_MagFs", default=[], dist_reduce_fx="cat")
 
     def update(self, batch, output):  # pylint: disable=arguments-differ
-        loss = self.loss_fn(pred=output, ref=batch)
+        # Validation is evaluated independently by every distributed rank.
+        # Avoid per-batch DDP reductions here: response derivatives can make
+        # individual batches take very different amounts of time, so a
+        # reduction inside the loss can leave faster ranks waiting for the
+        # slowest rank until NCCL times out.  MACELoss synchronizes its
+        # accumulated states once in ``compute()`` below.
+        loss = self.loss_fn(pred=output, ref=batch, ddp=False)
         self.total_loss += loss
         self.num_data += batch.num_graphs
 

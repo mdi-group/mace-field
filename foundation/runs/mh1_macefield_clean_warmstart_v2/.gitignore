@@ -1,0 +1,6 @@
+# Runtime products are intentionally local to this warm-start retry.
+checkpoints/*
+models/*
+results/*
+logs/*
+work/*
