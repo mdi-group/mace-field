@@ -16,6 +16,7 @@ import torch
 from mace.modules.loss import (
     DipolePolarLoss,
     DipoleSingleLoss,
+    UniversalFieldLoss,
     UniversalLoss,
     WeightedEnergyForcesDipoleLoss,
     WeightedEnergyForcesL1L2Loss,
@@ -33,6 +34,7 @@ from mace.modules.loss import (
     weighted_mean_squared_error_energy,
     weighted_mean_squared_stress,
     weighted_mean_squared_virials,
+    polarizability_to_six,
 )
 
 
@@ -418,6 +420,60 @@ def test_dipole_polar_loss():
 
     loss_w = DipolePolarLoss(dipole_weight=3.0, polarizability_weight=0.5)
     assert loss_w(ref, pred).item() == pytest.approx(1.0 + 0.5)
+
+
+def test_polarizability_to_six_symmetrizes_and_preserves_frobenius_norm():
+    matrix = torch.tensor([[[2.0, 0.5, 0.0], [1.5, 3.0, -1.0], [0.0, 0.0, 4.0]]])
+    six = polarizability_to_six(matrix)
+    torch.testing.assert_close(
+        six,
+        torch.tensor([[2.0, 3.0, 4.0, 2.0**0.5, 0.0, -2.0**-0.5]]),
+    )
+    assert torch.linalg.vector_norm(six).item() == pytest.approx(
+        torch.linalg.matrix_norm(0.5 * (matrix + matrix.transpose(-1, -2))).item()
+    )
+
+
+def test_universal_field_loss_standardized_symmetric_polarizability():
+    ref = make_ref(
+        num_atoms_per_graph=(2,),
+        polarizability=torch.zeros(1, 3, 3),
+        polarizability_weight=torch.ones(1, 3, 3),
+        head=torch.tensor([0]),
+    )
+    pred = clone_pred(ref)
+    pred["polarizability"][0] = torch.tensor(
+        [[2.0, 0.5, 0.0], [1.5, 0.0, 0.0], [0.0, 0.0, 0.0]]
+    )
+    loss = UniversalFieldLoss(
+        energy_weight=1.0,
+        forces_weight=1.0,
+        stress_weight=1.0,
+        polarizability_weight=1.0,
+        polarizability_scales=torch.ones(1, 6),
+        polarizability_huber_delta=1.0,
+    )
+    expected = (1.5 + (2.0**0.5 - 0.5)) / 6.0
+    assert loss(ref, pred).item() == pytest.approx(expected)
+
+
+def test_universal_field_loss_uses_per_head_polarizability_scales():
+    ref = make_ref(
+        num_atoms_per_graph=(2, 2),
+        polarizability=torch.zeros(2, 3, 3),
+        polarizability_weight=torch.ones(2, 3, 3),
+        head=torch.tensor([0, 1]),
+    )
+    pred = clone_pred(ref)
+    pred["polarizability"][:, 0, 0] = 2.0
+    loss = UniversalFieldLoss(
+        polarizability_weight=1.0,
+        polarizability_scales=torch.tensor([[1.0] * 6, [2.0] * 6]),
+        polarizability_huber_delta=1.0,
+    )
+    # First head: Huber(2)=1.5; second head: Huber(1)=0.5; average over
+    # six standardized components and the two equally weighted configs.
+    assert loss(ref, pred).item() == pytest.approx((1.5 / 6.0 + 0.5 / 6.0) / 2.0)
 
 
 def test_weighted_energy_forces_dipole_loss():

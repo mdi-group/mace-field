@@ -969,14 +969,39 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         "--polarizability_weight",
         help="weight of polarizability loss",
         type=float,
-        default=10.0,
+        default=1.0,
+    )
+    parser.add_argument(
+        "--polarizability_loss_mode",
+        help=(
+            "polarizability loss form: robustly standardized symmetric six-"
+            "component Huber loss, or the legacy raw 3x3 Huber loss"
+        ),
+        type=str,
+        choices=["standardized_symmetric_huber", "raw_huber"],
+        default="standardized_symmetric_huber",
+    )
+    parser.add_argument(
+        "--polarizability_huber_delta",
+        help="Huber delta after robust polarizability standardization",
+        type=float,
+        default=1.0,
+    )
+    parser.add_argument(
+        "--polarizability_scale_core_max_norm",
+        help=(
+            "maximum Frobenius norm retained when estimating per-head "
+            "polarizability scales"
+        ),
+        type=float,
+        default=1000.0,
     )
     parser.add_argument(
         "--swa_polarizability_weight",
         "--stage_two_polarizability_weight",
         help="weight of polarizability after starting Stage Two (previously called swa)",
         type=float,
-        default=1000.0,
+        default=1.0,
         dest="swa_polarizability_weight",
     )
     parser.add_argument(

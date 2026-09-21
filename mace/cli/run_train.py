@@ -59,6 +59,7 @@ from mace.tools.scripts_utils import (
     SubsetCollection,
     check_path_ase_read,
     convert_to_json_format,
+    compute_polarizability_scales,
     dict_to_array,
     extract_config_mace_model,
     get_atomic_energies,
@@ -825,7 +826,17 @@ def run(args) -> None:
             generator=torch.Generator().manual_seed(args.seed),
         )
 
-    loss_fn = get_loss_fn(args, dipole_only, args.compute_dipole)
+    polarizability_scales = compute_polarizability_scales(
+        head_configs,
+        heads,
+        core_max_norm=args.polarizability_scale_core_max_norm,
+    )
+    loss_fn = get_loss_fn(
+        args,
+        dipole_only,
+        args.compute_dipole,
+        polarizability_scales=polarizability_scales,
+    )
     args.avg_num_neighbors = get_avg_num_neighbors(head_configs, args, train_loader, device)
 
     # Model
@@ -926,7 +937,14 @@ def run(args) -> None:
     swa: Optional[tools.SWAContainer] = None
     swas = [False]
     if args.swa:
-        swa, swas = get_swa(args, model, optimizer, swas, dipole_only)
+        swa, swas = get_swa(
+            args,
+            model,
+            optimizer,
+            swas,
+            dipole_only,
+            polarizability_scales=polarizability_scales,
+        )
 
     checkpoint_handler = tools.CheckpointHandler(
         directory=args.checkpoints_dir,

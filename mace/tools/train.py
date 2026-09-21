@@ -86,6 +86,32 @@ def _model_output_kwargs(batch, output_args: Dict[str, bool], training: bool):
     return kwargs
 
 
+def polarizability_log_eigenvalue_error(
+    reference: torch.Tensor, prediction: torch.Tensor
+) -> torch.Tensor:
+    """Return errors in log eigenvalues of ``I + symmetric(alpha)``.
+
+    The identity shift gives a dimensionless dielectric-like response and
+    keeps the diagnostic defined for small polarizabilities.  Predicted
+    matrices are symmetrized and eigenvalues are clamped only for this
+    diagnostic; the primary training loss remains unconstrained.
+    """
+    reference = reference.view(-1, 3, 3)
+    prediction = prediction.view(-1, 3, 3)
+    reference = 0.5 * (reference + reference.transpose(-1, -2))
+    prediction = 0.5 * (prediction + prediction.transpose(-1, -2))
+    identity = torch.eye(
+        3, device=reference.device, dtype=reference.dtype
+    ).expand(reference.shape[0], -1, -1)
+    reference_eigenvalues = torch.linalg.eigvalsh(identity + reference).clamp_min(
+        1.0e-8
+    )
+    prediction_eigenvalues = torch.linalg.eigvalsh(identity + prediction).clamp_min(
+        1.0e-8
+    )
+    return torch.log(prediction_eigenvalues) - torch.log(reference_eigenvalues)
+
+
 def valid_err_log(
     valid_loss,
     eval_metrics,
@@ -696,6 +722,11 @@ class MACELoss(Metric):
         self.add_state(
             "delta_polarizability_per_atom", default=[], dist_reduce_fx="cat"
         )
+        self.add_state(
+            "delta_polarizability_log_eigenvalue",
+            default=[],
+            dist_reduce_fx="cat",
+        )
 
         self.add_state(
             "MagFs_computed", default=torch.tensor(0.0), dist_reduce_fx="sum"
@@ -801,6 +832,17 @@ class MACELoss(Metric):
             output.get("polarizability") is not None
             and batch.polarizability is not None
         ):
+            log_eigenvalue_error = polarizability_log_eigenvalue_error(
+                batch.polarizability, output["polarizability"]
+            )
+            polarizability_active = torch.any(
+                batch.weight.view(-1, 1, 1) * batch.polarizability_weight > 0,
+                dim=(-1, -2),
+            )
+            if torch.any(polarizability_active):
+                self.delta_polarizability_log_eigenvalue.append(
+                    log_eigenvalue_error[polarizability_active]
+                )
             self.delta_polarizability.append(
                 batch.polarizability - output["polarizability"]
             )
@@ -917,5 +959,14 @@ class MACELoss(Metric):
                 delta_polarizability_per_atom
             )
             aux["q95_polarizability"] = compute_q95(delta_polarizability)
+            delta_polarizability_log_eigenvalue = self.convert(
+                self.delta_polarizability_log_eigenvalue
+            )
+            aux["mae_polarizability_log_eigenvalue"] = compute_mae(
+                delta_polarizability_log_eigenvalue
+            )
+            aux["rmse_polarizability_log_eigenvalue"] = compute_rmse(
+                delta_polarizability_log_eigenvalue
+            )
 
         return aux["loss"], aux

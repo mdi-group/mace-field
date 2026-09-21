@@ -789,10 +789,82 @@ def get_avg_num_neighbors(head_configs, args, train_loader, device):
     return avg_num_neighbors_out
 
 
+def compute_polarizability_scales(
+    head_configs,
+    heads: List[str],
+    core_max_norm: float = 1000.0,
+    floor: float = 1.0e-6,
+) -> np.ndarray:
+    """Estimate robust six-component polarizability scales from train cores.
+
+    The scale is computed independently for every head from the symmetrized
+    six-vector.  A finite Frobenius-norm cutoff keeps an extreme-response tail
+    from setting the scale; the tail remains available to validation and later
+    explicit tail training.  Heads without active polarizability labels use
+    unit scales because their loss term is inactive.
+    """
+    values_by_head = {head: [] for head in heads}
+    for head_config in head_configs:
+        head_name = head_config.head_name
+        if head_name not in values_by_head:
+            continue
+        train_configs = getattr(
+            getattr(head_config, "collections", None), "train", []
+        )
+        for config in train_configs:
+            value = config.properties.get("polarizability")
+            weight = config.property_weights.get("polarizability", 0.0)
+            if value is None or not np.any(np.asarray(weight) != 0):
+                continue
+            matrix = np.asarray(value, dtype=float).reshape(3, 3)
+            if not np.isfinite(matrix).all():
+                continue
+            matrix = 0.5 * (matrix + matrix.T)
+            if np.linalg.norm(matrix) > core_max_norm:
+                continue
+            values_by_head[head_name].append(
+                np.array(
+                    [
+                        matrix[0, 0],
+                        matrix[1, 1],
+                        matrix[2, 2],
+                        np.sqrt(2.0) * matrix[0, 1],
+                        np.sqrt(2.0) * matrix[0, 2],
+                        np.sqrt(2.0) * matrix[1, 2],
+                    ]
+                )
+            )
+
+    scales = np.ones((len(heads), 6), dtype=float)
+    for head_index, head_name in enumerate(heads):
+        values = np.asarray(values_by_head[head_name], dtype=float)
+        if values.size == 0:
+            logging.info(
+                "Polarizability scale for head %s: no active training labels; "
+                "using unit scales",
+                head_name,
+            )
+            continue
+        median = np.median(values, axis=0)
+        mad_scale = 1.4826 * np.median(np.abs(values - median), axis=0)
+        iqr_scale = (
+            np.percentile(values, 75, axis=0) - np.percentile(values, 25, axis=0)
+        ) / 1.349
+        scales[head_index] = np.maximum(np.maximum(mad_scale, iqr_scale), floor)
+        logging.info(
+            "Polarizability scale for head %s from %d core labels: %s",
+            head_name,
+            len(values),
+            np.array2string(scales[head_index], precision=6, separator=", "),
+        )
+    return scales
+
+
 def get_loss_fn(
     args: argparse.Namespace,
     dipole_only: bool,
     compute_dipole: bool,
+    polarizability_scales: Optional[np.ndarray] = None,
 ) -> torch.nn.Module:
     if args.loss == "weighted":
         loss_fn = modules.WeightedEnergyForcesLoss(
@@ -865,6 +937,13 @@ def get_loss_fn(
             polarization_loss_scale=getattr(args, "polarization_loss_scale", 1.0),
             becs_weight=args.becs_weight,
             polarizability_weight=args.polarizability_weight,
+            polarizability_loss_mode=getattr(
+                args, "polarizability_loss_mode", "standardized_symmetric_huber"
+            ),
+            polarizability_huber_delta=getattr(
+                args, "polarizability_huber_delta", 1.0
+            ),
+            polarizability_scales=polarizability_scales,
         )
     else:
         loss_fn = modules.WeightedEnergyForcesLoss(energy_weight=1.0, forces_weight=1.0)
@@ -877,6 +956,7 @@ def get_swa(
     optimizer: torch.optim.Optimizer,
     swas: List[bool],
     dipole_only: bool = False,
+    polarizability_scales: Optional[np.ndarray] = None,
 ):
     assert dipole_only is False, "Stage Two for dipole fitting not implemented"
     swas.append(True)
@@ -950,6 +1030,13 @@ def get_swa(
             becs_weight=args.swa_becs_weight,
             polarizability_weight=args.swa_polarizability_weight,
             huber_delta=args.huber_delta,
+            polarizability_loss_mode=getattr(
+                args, "polarizability_loss_mode", "standardized_symmetric_huber"
+            ),
+            polarizability_huber_delta=getattr(
+                args, "polarizability_huber_delta", 1.0
+            ),
+            polarizability_scales=polarizability_scales,
         )
     else:
         loss_fn_energy = modules.WeightedEnergyForcesLoss(

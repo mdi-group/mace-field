@@ -50,6 +50,52 @@ def reduce_loss(raw_loss: torch.Tensor, ddp: Optional[bool] = None) -> torch.Ten
     return raw_loss.mean()
 
 
+def polarizability_to_six(polarizability: torch.Tensor) -> torch.Tensor:
+    """Return the symmetric six-component representation of a 3x3 tensor.
+
+    The off-diagonal components carry a ``sqrt(2)`` factor so that the
+    Euclidean norm of the six-vector is the Frobenius norm of the symmetric
+    tensor.  This makes the loss rotationally consistent while avoiding the
+    duplicate lower-triangular entries of a matrix target.
+    """
+    tensor = polarizability.view(-1, 3, 3)
+    symmetric = 0.5 * (tensor + tensor.transpose(-1, -2))
+    sqrt_two = tensor.new_tensor(2.0).sqrt()
+    return torch.stack(
+        (
+            symmetric[:, 0, 0],
+            symmetric[:, 1, 1],
+            symmetric[:, 2, 2],
+            sqrt_two * symmetric[:, 0, 1],
+            sqrt_two * symmetric[:, 0, 2],
+            sqrt_two * symmetric[:, 1, 2],
+        ),
+        dim=-1,
+    )
+
+
+def _weighted_config_mean(
+    per_config_loss: torch.Tensor,
+    config_weight: torch.Tensor,
+    ddp: Optional[bool] = None,
+) -> torch.Tensor:
+    """Average one scalar loss per configuration using active config weights."""
+    ddp = is_ddp_enabled() if ddp is None else ddp
+    config_weight = config_weight.to(dtype=per_config_loss.dtype)
+    local_sum = (per_config_loss * config_weight).sum()
+    local_weight = config_weight.sum()
+    if ddp and dist.is_initialized():
+        world_size = dist.get_world_size()
+        dist.all_reduce(local_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(local_weight, op=dist.ReduceOp.SUM)
+        if local_weight.item() == 0.0:
+            return local_sum * 0.0
+        return local_sum * world_size / local_weight
+    if local_weight.item() == 0.0:
+        return local_sum * 0.0
+    return local_sum / local_weight
+
+
 def polarization_quantum_lattice(cell: torch.Tensor) -> torch.Tensor:
     cell = cell.view(-1, 3, 3)
     volume = torch.linalg.det(cell).abs().clamp_min(1e-30).view(-1, 1, 1)
@@ -707,6 +753,9 @@ class UniversalFieldLoss(torch.nn.Module):
         polarization_loss_mode="normalized_metric",
         polarization_huber_delta=None,
         polarization_loss_scale=1.0,
+        polarizability_loss_mode="standardized_symmetric_huber",
+        polarizability_huber_delta=1.0,
+        polarizability_scales=None,
     ) -> None:
         super().__init__()
         if polarization_loss_mode not in {"cartesian_huber", "normalized_metric"}:
@@ -714,6 +763,16 @@ class UniversalFieldLoss(torch.nn.Module):
                 "polarization_loss_mode must be one of "
                 "{'cartesian_huber', 'normalized_metric'}"
             )
+        if polarizability_loss_mode not in {
+            "raw_huber",
+            "standardized_symmetric_huber",
+        }:
+            raise ValueError(
+                "polarizability_loss_mode must be one of "
+                "{'raw_huber', 'standardized_symmetric_huber'}"
+            )
+        if polarizability_huber_delta <= 0:
+            raise ValueError("polarizability_huber_delta must be positive")
         self.huber_delta = huber_delta
         self.polarization_loss_mode = polarization_loss_mode
         self.polarization_huber_delta = (
@@ -749,6 +808,87 @@ class UniversalFieldLoss(torch.nn.Module):
             "polarizability_weight",
             torch.tensor(polarizability_weight, dtype=torch.get_default_dtype()),
         )
+        if polarizability_scales is None:
+            polarizability_scales = torch.ones(
+                (1, 6), dtype=torch.get_default_dtype()
+            )
+        else:
+            polarizability_scales = torch.as_tensor(
+                polarizability_scales, dtype=torch.get_default_dtype()
+            )
+            if polarizability_scales.ndim == 1:
+                polarizability_scales = polarizability_scales.view(1, 6)
+        if (
+            polarizability_scales.ndim != 2
+            or polarizability_scales.shape[-1] != 6
+            or not torch.isfinite(polarizability_scales).all()
+            or torch.any(polarizability_scales <= 0)
+        ):
+            raise ValueError(
+                "polarizability_scales must be a finite positive tensor with "
+                "shape [n_heads, 6]"
+            )
+        self.polarizability_loss_mode = polarizability_loss_mode
+        self.polarizability_huber_delta = float(polarizability_huber_delta)
+        self.register_buffer("polarizability_scales", polarizability_scales)
+
+    def _polarizability_scales_for_batch(
+        self, ref: Batch, num_configs: int
+    ) -> torch.Tensor:
+        """Select the robust six-component scale for each graph head."""
+        if self.polarizability_scales.shape[0] == 1:
+            return self.polarizability_scales.expand(num_configs, -1)
+        head = getattr(ref, "head", None)
+        if head is None:
+            head_index = torch.zeros(
+                num_configs,
+                dtype=torch.long,
+                device=self.polarizability_scales.device,
+            )
+        else:
+            head_index = head.view(-1).long()
+            if head_index.numel() == 1 and num_configs != 1:
+                head_index = head_index.expand(num_configs)
+            if head_index.numel() != num_configs:
+                raise ValueError(
+                    "Batch head index count does not match polarizability labels"
+                )
+            head_index = head_index.to(self.polarizability_scales.device)
+            if torch.any(head_index < 0) or torch.any(
+                head_index >= self.polarizability_scales.shape[0]
+            ):
+                raise ValueError("Batch contains a head outside polarizability_scales")
+        return self.polarizability_scales[head_index]
+
+    def _compute_polarizability_loss(
+        self, ref: Batch, pred: TensorDict, ddp: Optional[bool]
+    ) -> torch.Tensor:
+        reference = ref["polarizability"].view(-1, 3, 3)
+        prediction = pred["polarizability"].view(-1, 3, 3)
+        config_weight = ref.polarizability_weight.view(-1, 3, 3).mean(dim=(-1, -2))
+
+        if self.polarizability_loss_mode == "raw_huber":
+            element_loss = torch.nn.functional.huber_loss(
+                prediction,
+                reference,
+                reduction="none",
+                delta=self.polarizability_huber_delta,
+            )
+        else:
+            reference_six = polarizability_to_six(reference)
+            prediction_six = polarizability_to_six(prediction)
+            scales = self._polarizability_scales_for_batch(
+                ref, reference_six.shape[0]
+            ).to(device=reference_six.device, dtype=reference_six.dtype)
+            element_loss = torch.nn.functional.huber_loss(
+                prediction_six / scales,
+                reference_six / scales,
+                reduction="none",
+                delta=self.polarizability_huber_delta,
+            )
+
+        per_config_loss = element_loss.reshape(element_loss.shape[0], -1).mean(dim=-1)
+        return _weighted_config_mean(per_config_loss, config_weight, ddp)
 
     def forward(
         self, ref: Batch, pred: TensorDict, ddp: Optional[bool] = None
@@ -820,11 +960,6 @@ class UniversalFieldLoss(torch.nn.Module):
         else:
             configs_becs_weight = None
 
-        if use_polarizability:
-            configs_polarizability_weight = ref.polarizability_weight.view(-1, 3, 3)
-        else:
-            configs_polarizability_weight = None
-
         # --- energy / forces / stress ---
         if ddp:
             loss_energy = torch.nn.functional.huber_loss(
@@ -886,13 +1021,9 @@ class UniversalFieldLoss(torch.nn.Module):
                 loss_becs = torch.tensor(0.0, device=configs_energy_weight.device)
 
             if use_polarizability:
-                loss_polarizability = torch.nn.functional.huber_loss(
-                    configs_polarizability_weight * ref["polarizability"],
-                    configs_polarizability_weight * pred["polarizability"],
-                    reduction="none",
-                    delta=self.huber_delta,
+                loss_polarizability = self._compute_polarizability_loss(
+                    ref, pred, ddp
                 )
-                loss_polarizability = reduce_loss(loss_polarizability, ddp)
             else:
                 loss_polarizability = torch.tensor(
                     0.0, device=configs_energy_weight.device
@@ -951,11 +1082,8 @@ class UniversalFieldLoss(torch.nn.Module):
                 loss_becs = torch.tensor(0.0, device=configs_energy_weight.device)
 
             if use_polarizability:
-                loss_polarizability = torch.nn.functional.huber_loss(
-                    configs_polarizability_weight * ref["polarizability"],
-                    configs_polarizability_weight * pred["polarizability"],
-                    reduction="mean",
-                    delta=self.huber_delta,
+                loss_polarizability = self._compute_polarizability_loss(
+                    ref, pred, ddp
                 )
             else:
                 loss_polarizability = torch.tensor(
