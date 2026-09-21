@@ -850,7 +850,14 @@ def compute_polarizability_scales(
         iqr_scale = (
             np.percentile(values, 75, axis=0) - np.percentile(values, 25, axis=0)
         ) / 1.349
-        scales[head_index] = np.maximum(np.maximum(mad_scale, iqr_scale), floor)
+        empirical_scale = np.maximum(mad_scale, iqr_scale)
+        nonzero_scales = empirical_scale[empirical_scale > floor]
+        if nonzero_scales.size:
+            zero_variance_floor = 0.01 * np.median(nonzero_scales)
+        else:
+            zero_variance_floor = 0.01 * max(1.0, np.median(np.abs(values)))
+        component_floor = max(floor, zero_variance_floor)
+        scales[head_index] = np.maximum(empirical_scale, component_floor)
         logging.info(
             "Polarizability scale for head %s from %d core labels: %s",
             head_name,

@@ -1,0 +1,41 @@
+# Clean-data continuation of the paused MH-1 MACEField fine-tuning run.
+# Paths are resolved from the repository root by run.sh.
+heads:
+  MP-ferroelectric:
+    train_file: foundation/data/cleaned_strict/branch_splits/MP-ferroelectric_train.extxyz
+    valid_file: foundation/data/cleaned_strict/branch_splits/MP-ferroelectric_valid.extxyz
+    info_keys:
+      electric_field: REF_electric_field
+      polarization: REF_polarization
+  finite-field-ferroelectric:
+    train_file: foundation/data/cleaned_strict/branch_splits/finite-field-ferroelectric_train.extxyz
+    valid_file: foundation/data/cleaned_strict/branch_splits/finite-field-ferroelectric_valid.extxyz
+    info_keys:
+      electric_field: REF_electric_field
+      polarization: REF_total_polarisation
+  C2DB:
+    train_file: foundation/data/cleaned_strict/C2DB.xyz
+    valid_fraction: 0.05
+    arrays_keys:
+      becs: REF_becs
+  MP-Dielectric:
+    train_file: foundation/data/cleaned_strict/polarizability/MP-Dielectric.xyz
+    valid_fraction: 0.05
+    info_keys:
+      polarizability: REF_polarizability
+    arrays_keys:
+      becs: REF_becs
+  JarvisDB:
+    train_file: foundation/data/cleaned_strict/polarizability/JarvisDB.xyz
+    valid_fraction: 0.05
+    info_keys:
+      polarizability: REF_polarizability
+    arrays_keys:
+      becs: REF_becs
+  Togo:
+    train_file: foundation/data/cleaned_strict/polarizability/Togo.xyz
+    valid_fraction: 0.05
+    info_keys:
+      polarizability: REF_polarizability
+    arrays_keys:
+      becs: REF_becs

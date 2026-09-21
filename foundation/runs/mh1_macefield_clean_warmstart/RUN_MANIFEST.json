@@ -1,0 +1,16 @@
+{
+  "run_name": "mh1_macefield_clean_warmstart",
+  "seed": 123,
+  "source_checkpoint": "foundation/models/mh1_macefield_production_run-123_epoch-35.pt",
+  "source_checkpoint_sha256": "d063b901ee6400030b7c4f8603b9d2660023444edfafb399e51d33d18c2ac491",
+  "copied_checkpoint": "foundation/runs/mh1_macefield_clean_warmstart/checkpoints/mh1_macefield_clean_warmstart_run-123_epoch-35.pt",
+  "dataset_config": "foundation/runs/mh1_macefield_clean_warmstart/config/mh1_macefield_heads_strict.yaml",
+  "dataset_manifest": "foundation/manifests/strict_cleaning.json",
+  "loss": {
+    "name": "standardized_symmetric_huber",
+    "polarizability_weight": 1.0,
+    "polarizability_huber_delta": 1.0,
+    "polarizability_scale_core_max_norm": 1000.0
+  },
+  "original_run_untouched": true
+}
