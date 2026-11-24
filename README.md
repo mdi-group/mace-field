@@ -88,8 +88,10 @@ the energy remains the scalar readout.
 
 The notebooks, example datasets, and Colab launchers are maintained in the
 [MACE-Field tutorials repository](https://github.com/mdi-group/mace-field-tutorial).
-It includes a MACEField architecture and training sequence, a finite-field ASE
-molecular-dynamics workflow, and a broader MACE extension lab.
+It focuses on MACEField architecture, response labels, training, and a
+finite-field ASE molecular-dynamics workflow. The repository also contains
+the older dielectric and ferroelectric datasets used by its response-data
+notebooks.
 
 ## Data format
 

@@ -225,9 +225,7 @@ def compute_hessians_vmap(
             I_N
         )[0]
     except RuntimeError:
-        gradient = compute_hessians_loop(
-            forces, positions, create_graph=create_graph
-        )
+        gradient = compute_hessians_loop(forces, positions, create_graph=create_graph)
     if gradient is None:
         return torch.zeros((positions.shape[0], forces.shape[0], 3, 3))
     return gradient

@@ -108,6 +108,7 @@ class HDF5Dataset(Dataset):
         supports both the grouped configuration schema and the direct
         ``AtomicData`` schema used by older HDF5 exports.
         """
+
         def read(group, name):
             if name not in group:
                 return None
@@ -130,12 +131,16 @@ class HDF5Dataset(Dataset):
                     properties = config.get("properties")
                     property_weights = config.get("property_weights")
                     yield (
-                        read(properties, property_name)
-                        if properties is not None
-                        else None,
-                        read(property_weights, property_name)
-                        if property_weights is not None
-                        else None,
+                        (
+                            read(properties, property_name)
+                            if properties is not None
+                            else None
+                        ),
+                        (
+                            read(property_weights, property_name)
+                            if property_weights is not None
+                            else None
+                        ),
                     )
 
     def _get_direct_atomic_data(self, index):
@@ -231,8 +236,7 @@ def configurations_for_e0_estimation(
                 sorted(
                     shard
                     for shard in path.iterdir()
-                    if shard.is_file()
-                    and shard.suffix.lower() in (".h5", ".hdf5")
+                    if shard.is_file() and shard.suffix.lower() in (".h5", ".hdf5")
                 )
             )
         elif path.is_file() and path.suffix.lower() in (".h5", ".hdf5"):

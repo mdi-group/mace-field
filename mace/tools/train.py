@@ -445,7 +445,11 @@ def train(
             )
         current_values = {}
         with torch.no_grad():
-            for name, (weight_tensor, start_weight, end_weight) in loss_weight_ramps.items():
+            for name, (
+                weight_tensor,
+                start_weight,
+                end_weight,
+            ) in loss_weight_ramps.items():
                 current_weight = start_weight + fraction * (end_weight - start_weight)
                 weight_tensor.fill_(current_weight)
                 current_values[name] = current_weight
@@ -981,12 +985,10 @@ class MACELoss(Metric):
                     # mace.tools package initialization cycle.
                     from mace.modules.loss import hessian_hvp_residuals_for_batch
 
-                    residuals, active_hessian_configs = (
-                        hessian_hvp_residuals_for_batch(batch, output)
+                    residuals, active_hessian_configs = hessian_hvp_residuals_for_batch(
+                        batch, output
                     )
-                    for graph_index, residual in zip(
-                        active_hessian_configs, residuals
-                    ):
+                    for graph_index, residual in zip(active_hessian_configs, residuals):
                         if not bool(hessian_active[graph_index].item()):
                             continue
                         # Average projected squared norms over probes to

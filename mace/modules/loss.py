@@ -169,13 +169,13 @@ def hessian_hvp_residuals_for_batch(ref: Batch, pred: TensorDict):
         reference_hvp = torch.einsum(
             "ijab,kia->kjb", reference_blocks, graph_probes
         ).reshape(probes.shape[0], num_dofs)
-        residuals.append(
-            predicted_hvps[:, 3 * start : 3 * stop] - reference_hvp
-        )
+        residuals.append(predicted_hvps[:, 3 * start : 3 * stop] - reference_hvp)
         active_config_indices.append(graph_index)
         block_offset += num_pair_blocks
     if block_offset != reference_hessian.shape[0]:
-        raise ValueError("Packed Hessian labels do not match the atom counts in the batch")
+        raise ValueError(
+            "Packed Hessian labels do not match the atom counts in the batch"
+        )
     return residuals, active_config_indices
 
 
@@ -1082,9 +1082,9 @@ class UniversalFieldLoss(torch.nn.Module):
                         )
                     ]
                 )
-            hessian_config_weight = (
-                ref.weight.view(-1) * ref.hessian_weight.view(-1)
-            )[active_hessian_configs]
+            hessian_config_weight = (ref.weight.view(-1) * ref.hessian_weight.view(-1))[
+                active_hessian_configs
+            ]
             loss_hessian = _weighted_config_mean(
                 per_config_hessian_loss, hessian_config_weight, ddp
             )
@@ -1180,9 +1180,7 @@ class UniversalFieldLoss(torch.nn.Module):
                     delta=self.huber_delta,
                 )
             else:
-                loss_stress = torch.tensor(
-                    0.0, device=configs_energy_weight.device
-                )
+                loss_stress = torch.tensor(0.0, device=configs_energy_weight.device)
 
             if use_polarization:
                 if self.polarization_loss_mode == "normalized_metric":

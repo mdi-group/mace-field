@@ -773,10 +773,13 @@ class MACELES(ScaleShiftMACE):
         compute_edge_forces: bool = False,
         compute_atomic_stresses: bool = False,
         lammps_mliap: bool = False,
-        compute_bec: bool = False,
         compute_polarization: bool = False,  # pylint: disable=unused-argument
         compute_becs: bool = False,  # pylint: disable=unused-argument
         compute_polarizability: bool = False,  # pylint: disable=unused-argument
+        electric_field: Optional[
+            torch.Tensor
+        ] = None,  # pylint: disable=unused-argument
+        compute_bec: bool = False,
     ) -> Dict[str, Optional[torch.Tensor]]:
         ctx = prepare_graph(
             data,

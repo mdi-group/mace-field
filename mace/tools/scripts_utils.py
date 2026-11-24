@@ -829,13 +829,14 @@ def compute_polarizability_scales(
                         getattr(item, property_name, None),
                         getattr(item, f"{property_name}_weight", None),
                     )
-        elif dataset is not None and hasattr(dataset, "__len__") and hasattr(
-            dataset, "__getitem__"
+        elif (
+            dataset is not None
+            and hasattr(dataset, "__len__")
+            and hasattr(dataset, "__getitem__")
         ):
             # Non-HDF5 datasets have no raw-property iterator, so inspect their
             # items as a correctness-preserving fallback.
-            for index in range(len(dataset)):
-                item = dataset[index]
+            for item in dataset:
                 if hasattr(item, "properties"):
                     yield (
                         item.properties.get(property_name),
@@ -873,9 +874,7 @@ def compute_polarizability_scales(
         head_name = head_config.head_name
         if head_name not in values_by_head:
             continue
-        train_configs = getattr(
-            getattr(head_config, "collections", None), "train", []
-        )
+        train_configs = getattr(getattr(head_config, "collections", None), "train", [])
         if train_configs:
             for config in train_configs:
                 add_label(
@@ -889,9 +888,7 @@ def compute_polarizability_scales(
         # already-loaded training dataset directly so their labels receive the
         # same robust per-head scaling as ASE-backed heads.
         train_dataset = (train_datasets_by_head or {}).get(head_name)
-        for value, weight in iter_dataset_property(
-            train_dataset, "polarizability"
-        ):
+        for value, weight in iter_dataset_property(train_dataset, "polarizability"):
             add_label(head_name, value, weight)
 
     scales = np.ones((len(heads), 6), dtype=float)
@@ -932,18 +929,16 @@ def get_loss_fn(
     compute_dipole: bool,
     polarizability_scales: Optional[np.ndarray] = None,
 ) -> torch.nn.Module:
-    hessian_supervision = (
-        getattr(args, "hessian_weight", 0.0) != 0.0
-        or (
-            getattr(args, "swa", False)
-            and getattr(args, "swa_hessian_weight", 0.0) != 0.0
-        )
+    hessian_supervision = getattr(args, "hessian_weight", 0.0) != 0.0 or (
+        getattr(args, "swa", False) and getattr(args, "swa_hessian_weight", 0.0) != 0.0
     )
     if hessian_supervision and getattr(args, "model", None) not in (
         "MACEField",
         "FoundationMACEField",
     ):
-        raise ValueError("Hessian supervision is currently supported for MACEField models.")
+        raise ValueError(
+            "Hessian supervision is currently supported for MACEField models."
+        )
     if hessian_supervision and args.loss not in ("universal_field", "UniversalField"):
         raise ValueError(
             "Hessian supervision is supported by the universal_field loss; "

@@ -1,3 +1,4 @@
+# pylint: disable=too-many-lines
 ###########################################################################################
 # Parsing functionalities
 # Authors: Ilyes Batatia, Gregor Simm, David Kovacs

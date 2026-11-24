@@ -235,7 +235,7 @@ def test_macefield_trains_and_validates_force_hessian(tmp_path):
         }
 
         output_kwargs = _model_output_kwargs(
-            batch, output_args, training=True, loss_fn=loss_fn
+            model, batch, output_args, training=True, loss_fn=loss_fn
         )
         assert output_kwargs["compute_force"] is True
         assert output_kwargs["compute_hessian"] is True
