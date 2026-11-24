@@ -762,6 +762,7 @@ def test_macefield_multihead_calculator_heads(
     # Same foundation trick as the smoke test (avoid skip_tp reshape branch).
     foundation_path = tmp_path / "mace_nonlin.model"
     with default_dtype(torch.float32):
+        torch.manual_seed(7)
         cfg = dict(MODEL_CONFIG)
         cfg["interaction_cls"] = interaction_classes[
             "RealAgnosticResidualNonLinearInteractionBlock"
