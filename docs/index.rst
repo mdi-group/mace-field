@@ -15,20 +15,20 @@ the Colab-ready tutorials.
 
 .. toctree::
    :maxdepth: 2
-   :caption: Quick Start
+   :caption: Getting Started
 
    quick-start
 
 .. toctree::
    :maxdepth: 2
-   :caption: User Guide
+   :caption: Guides and Tutorials
 
    guide/index
    examples/index
 
 .. toctree::
    :maxdepth: 1
-   :caption: Project
+   :caption: Project Information
 
    references
    development

@@ -26,31 +26,19 @@ contains MACE-Field-only notebooks, example data, and Colab launch links.
 
 ## Install from source
 
-Package publication is pending. For now, install from a source checkout. First
-install a PyTorch build suitable for your hardware using the
-[PyTorch installation selector](https://pytorch.org/get-started/locally/),
-then run:
-
-```bash
-git clone https://github.com/mdi-group/mace-field.git
-cd mace-field
-python -m pip install -e .
-```
-
-See the [MACE installation guide](https://mace-docs.readthedocs.io/en/latest/guide/installation.html)
-for CUDA and optional accelerator setup. The MACE-Field-specific
-[installation guide](https://mace-field.readthedocs.io/en/latest/guide/installation.html)
-covers local development dependencies and documentation builds.
+Package publication is pending; for now, install from a source checkout. Follow
+the [MACE-Field installation guide](https://mace-field.readthedocs.io/en/latest/guide/installation.html)
+and choose a compatible PyTorch build with the
+[PyTorch installation selector](https://pytorch.org/get-started/locally/).
+For CUDA setup, see the [MACE installation guide](https://mace-docs.readthedocs.io/en/latest/guide/installation.html).
 
 ## Released checkpoint
 
 The [1.0.2 release](https://github.com/mdi-group/mace-field/releases/tag/1.0.2)
-includes the multi-head MH-0 checkpoint
-[`MACEField-MH-0-omat-dielectric.model`](https://github.com/mdi-group/mace-field/releases/download/1.0.2/MACEField-MH-0-omat-dielectric.model),
-an example fine-tuning script, and a dielectric/ferroelectric replay dataset.
-See the [quick start](https://mace-field.readthedocs.io/en/latest/quick-start.html)
-for a calculator example and the [fine-tuning guide](https://mace-field.readthedocs.io/en/latest/guide/fine-tuning.html)
-for instructions to adapt this or another foundation checkpoint.
+includes an MH-0 checkpoint, a fine-tuning script, and a
+dielectric/ferroelectric replay dataset. The [quick start](https://mace-field.readthedocs.io/en/latest/quick-start.html)
+shows how to load the checkpoint; the [fine-tuning guide](https://mace-field.readthedocs.io/en/latest/guide/fine-tuning.html)
+covers adapting MACE and MACE-Field foundations.
 
 ## Architecture
 

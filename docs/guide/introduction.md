@@ -30,7 +30,6 @@ default; field response keys are `REF_electric_field`,
 `REF_polarization`, `REF_becs`, and `REF_polarizability`. See [Data](data.md)
 for shapes and units.
 
-The polarization sign convention is
-$\mathbf{P}=-\partial E/\partial\boldsymbol{\mathcal{E}}$. For periodic materials, polarization is
-multivalued by a lattice quantum; use reference data and the periodic branch
-handling in `universal_field` consistently.
+For periodic materials, polarization is multivalued by a lattice quantum.
+Keep reference branch tracking consistent with the folding used by
+`universal_field`; see [Periodic polarization](training.md#periodic-polarization).

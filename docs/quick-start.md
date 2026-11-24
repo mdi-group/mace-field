@@ -7,18 +7,9 @@ labels.
 
 ## Install
 
-Install a PyTorch build that matches your CPU or CUDA environment. After the
-package release is available, installation instructions will be updated here.
-For now, install the source checkout in editable mode:
-
-```bash
-git clone https://github.com/mdi-group/mace-field.git
-cd mace-field
-python -m pip install -e .
-```
-
-For the editable installation and development tools, see
-[Installation](guide/installation.md).
+Install MACE-Field from source using the steps in the
+[installation guide](guide/installation.md), including the PyTorch build for
+your hardware. Return here for the first training and inference examples.
 
 ## Train a model
 

@@ -30,8 +30,14 @@ Computing BECs or polarizability also requires polarization internally.
 
 If a field value is absent, the model input defaults to zero. Do not give a
 nonzero weight to a response target that is missing from that configuration.
-For heterogeneous datasets, use the per-configuration property weights to
-mark which labels are present.
+Missing labels automatically receive zero weight. To mask a label that is
+present, set its per-configuration weight in `Atoms.info`, for example:
+
+```python
+atoms.info["config_polarization_weight"] = 0.0
+```
+
+The same `config_<property>_weight` pattern applies to other supported targets.
 
 ## Hessian labels
 
