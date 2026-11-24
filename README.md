@@ -52,6 +52,8 @@ python -m pip install -e .
 ```
 
 The distribution is named `mace-field-torch` and installs under the existing `mace` Python import name. Do not install it in the same environment as `mace-torch`; both distributions provide that import package.
+Pretrained MACE checkpoints are not bundled in the source repository; the model
+factory functions download them to the user cache on first use.
 
 The generic MACE installation, training, CUDA, and foundation-model guides are
 available in the [MACE documentation](https://mace-docs.readthedocs.io/).

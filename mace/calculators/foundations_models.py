@@ -500,9 +500,7 @@ def mace_anicc(
         - "Evaluation of the MACE Force Field Architecture by Dávid Péter Kovács, Ilyes Batatia, Eszter Sára Arany, and Gábor Csányi, The Journal of Chemical Physics, 2023, URL: https://doi.org/10.1063/5.0155322
     """
     if model_path is None:
-        model_path = os.path.join(
-            module_dir, "foundations_models/ani500k_large_CC.model"
-        )
+        model_path = os.path.join(get_cache_dir(), "ani500k_large_CC.model")
         print(
             "Using ANI couple cluster model for MACECalculator, see https://doi.org/10.1063/5.0155322"
         )

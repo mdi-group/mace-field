@@ -10,9 +10,12 @@ from e3nn.util import jit
 from scipy.spatial.transform import Rotation as R
 
 from mace import data, modules, tools
-from tests.helpers import REPO_ROOT
 from mace.calculators import mace_mp, mace_off, mace_omol
-from mace.calculators.foundations_models import mace_polar, polar_model_paths
+from mace.calculators.foundations_models import (
+    mace_mp_urls,
+    mace_polar,
+    polar_model_paths,
+)
 from mace.tools import torch_geometric
 from mace.tools.finetuning_utils import load_foundations_elements
 from mace.tools.scripts_utils import extract_config_mace_model, remove_pt_head
@@ -26,13 +29,7 @@ try:
 except (ImportError, ModuleNotFoundError):
     GRAPH_LONGRANGE_AVAILABLE = False
 
-MODEL_PATH = (
-    REPO_ROOT
-    / "mace"
-    / "calculators"
-    / "foundations_models"
-    / "2023-12-03-mace-mp.model"
-)
+MODEL_PATH = mace_mp_urls["medium"]
 
 
 @pytest.fixture(autouse=True)

@@ -51,3 +51,23 @@ def test_legacy_damping_name_is_accepted(d3_kwargs):
 def test_default_damping(d3_kwargs):
     fm.mace_mp(model="small", device="cpu", dispersion=True)
     assert d3_kwargs["damping"] == "bj"
+
+
+def test_anicc_default_download_uses_user_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(fm, "get_cache_dir", lambda: str(tmp_path))
+    downloads = []
+
+    def fake_download(url, filename, timeout=None):
+        downloads.append(url)
+        with open(filename, "wb"):
+            pass
+        return filename, "Content-Type: application/octet-stream"
+
+    monkeypatch.setattr(fm, "_urlretrieve_with_timeout", fake_download)
+    monkeypatch.setattr(fm, "MACECalculator", lambda **kwargs: kwargs)
+
+    calculator = fm.mace_anicc(device="cpu")
+
+    assert calculator["model_paths"] == str(tmp_path / "ani500k_large_CC.model")
+    assert len(downloads) == 1
+    assert downloads[0].endswith("/ani500k_large_CC.model")

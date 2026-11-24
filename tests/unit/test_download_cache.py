@@ -64,3 +64,24 @@ def test_second_attempt_retries_instead_of_reusing_the_error_page(html_download)
 def test_discard_is_quiet_when_the_file_is_already_gone(tmp_path):
     """Cleanup must not raise on top of the error it is reporting."""
     fm._discard_cached_download(str(tmp_path / "not-there"))
+
+
+def test_default_mp_checkpoint_download_uses_user_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(fm, "get_cache_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        fm, "local_model_path", str(tmp_path / "missing-package-checkpoint.model")
+    )
+    downloads = []
+
+    def fake_download(url, filename, timeout=None):
+        downloads.append(url)
+        with open(filename, "wb"):
+            pass
+        return filename, "Content-Type: application/octet-stream"
+
+    monkeypatch.setattr(fm, "_urlretrieve_with_timeout", fake_download)
+
+    checkpoint = fm.download_mace_mp_checkpoint()
+
+    assert checkpoint.startswith(str(tmp_path))
+    assert downloads == [fm.mace_mp_urls["medium-mpa-0"]]
