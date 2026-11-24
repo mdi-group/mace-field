@@ -199,6 +199,8 @@ def main() -> None:
 
 
 def run(args: argparse.Namespace) -> None:
+    if not hasattr(args, "electric_field"):
+        args.electric_field = None
     if not hasattr(args, "return_magforces"):
         args.return_magforces = False
     if not hasattr(args, "compute_bec"):

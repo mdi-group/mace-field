@@ -21,6 +21,7 @@ build/
 .vscode/
 *.txt
 !requirements/*.txt
+!docs/requirements.txt
 *.log
 
 # Distribution

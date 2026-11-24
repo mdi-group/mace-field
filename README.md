@@ -63,6 +63,15 @@ python -m pip install -e .
 
 The generic MACE installation, training, CUDA, and foundation-model guides are
 available in the [MACE documentation](https://mace-docs.readthedocs.io/).
+For MACE-Field-specific installation, data, training, and inference guidance,
+see the [MACE-Field documentation](docs/index.rst).
+
+Build the documentation site locally with:
+
+```bash
+python -m pip install -r docs/requirements.txt
+python -m sphinx -b html docs docs/_build/html
+```
 
 ## Released MH-0 MACE-Field checkpoint
 
