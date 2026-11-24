@@ -8,7 +8,7 @@ import dataclasses
 import logging
 import time
 from collections import defaultdict
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -47,6 +47,71 @@ class SWAContainer:
     loss_fn: torch.nn.Module
 
 
+def _has_active_property_weight(batch, name: str) -> bool:
+    """Return whether a response label is active in this batch.
+
+    AtomicData carries zero-valued placeholders for missing properties.  The
+    corresponding per-property weights are the authoritative indication that
+    a response should be evaluated.  Avoiding unused second derivatives is
+    important for large structures and leaves ordinary MACE batches on the
+    same forward path as before.
+    """
+    weights = getattr(batch, f"{name}_weight", None)
+    return weights is not None and bool(torch.any(weights != 0).item())
+
+
+def _model_output_kwargs(batch, output_args: Dict[str, bool], training: bool):
+    """Build model output flags, computing field responses only when labelled."""
+    kwargs = dict(
+        training=training,
+        compute_force=output_args["forces"],
+        compute_virials=output_args["virials"],
+        compute_stress=output_args["stress"],
+    )
+    if output_args.get("magforces", False):
+        kwargs["compute_magforces"] = True
+
+    polarization = output_args.get("polarization", False) and _has_active_property_weight(
+        batch, "polarization"
+    )
+    becs = output_args.get("becs", False) and _has_active_property_weight(batch, "becs")
+    polarizability = output_args.get("polarizability", False) and _has_active_property_weight(
+        batch, "polarizability"
+    )
+    # BECs and polarizabilities are derived from polarization, so they imply
+    # the first response even when no standalone polarization label is present.
+    kwargs["compute_polarization"] = polarization or becs or polarizability
+    kwargs["compute_becs"] = becs
+    kwargs["compute_polarizability"] = polarizability
+    return kwargs
+
+
+def polarizability_log_eigenvalue_error(
+    reference: torch.Tensor, prediction: torch.Tensor
+) -> torch.Tensor:
+    """Return errors in log eigenvalues of ``I + symmetric(alpha)``.
+
+    The identity shift gives a dimensionless dielectric-like response and
+    keeps the diagnostic defined for small polarizabilities.  Predicted
+    matrices are symmetrized and eigenvalues are clamped only for this
+    diagnostic; the primary training loss remains unconstrained.
+    """
+    reference = reference.view(-1, 3, 3)
+    prediction = prediction.view(-1, 3, 3)
+    reference = 0.5 * (reference + reference.transpose(-1, -2))
+    prediction = 0.5 * (prediction + prediction.transpose(-1, -2))
+    identity = torch.eye(
+        3, device=reference.device, dtype=reference.dtype
+    ).expand(reference.shape[0], -1, -1)
+    reference_eigenvalues = torch.linalg.eigvalsh(identity + reference).clamp_min(
+        1.0e-8
+    )
+    prediction_eigenvalues = torch.linalg.eigvalsh(identity + prediction).clamp_min(
+        1.0e-8
+    )
+    return torch.log(prediction_eigenvalues) - torch.log(reference_eigenvalues)
+
+
 def valid_err_log(
     valid_loss,
     eval_metrics,
@@ -55,15 +120,40 @@ def valid_err_log(
     epoch=None,
     valid_loader_name="Default",
 ):
-    eval_metrics["mode"] = "eval"
-    eval_metrics["epoch"] = epoch
-    eval_metrics["head"] = valid_loader_name
-    logger.log(eval_metrics)
+    # Keep the scalar validation objective alongside the full error record.
+    # The text log already displayed it, but the JSONL metrics stream did not
+    # expose whether a record was an optimizer loss or a validation loss.
+    eval_record = dict(eval_metrics)
+    eval_record["valid_loss"] = valid_loss
+    eval_record["mode"] = "eval"
+    eval_record["epoch"] = epoch
+    eval_record["head"] = valid_loader_name
+    logger.log(eval_record)
     if epoch is None:
         inintial_phrase = "Initial"
     else:
         inintial_phrase = f"Epoch {epoch}"
-    if log_errors == "PerAtomRMSE":
+    if log_errors == "PerAtomFieldRMSE":
+        # Field models use a dedicated error table.  This branch is kept in
+        # the per-epoch path as well as in tables_utils so training logs show
+        # the same quantities that are reported at the end of a run.
+        error_e = eval_metrics["rmse_e_per_atom"] * 1e3
+        error_f = eval_metrics["rmse_f"] * 1e3
+        error_stress = eval_metrics["rmse_stress"] * 1e3
+        error_polarization = eval_metrics["rmse_polarization"] * 1e3
+        error_becs = eval_metrics["rmse_becs"]
+        error_polarizability = eval_metrics["rmse_polarizability"]
+        logging.info(
+            f"{inintial_phrase}: head: {valid_loader_name}, "
+            f"loss={valid_loss:8.8f}, "
+            f"RMSE_E_per_atom={error_e:8.2f} meV, "
+            f"RMSE_F={error_f:8.2f} meV / A, "
+            f"RMSE_stress={error_stress:8.2f} meV / A^3, "
+            f"RMSE_polarization={error_polarization:8.2f} me|e| / A^2, "
+            f"RMSE_BECs={error_becs:8.2f} |e|, "
+            f"RMSE_polarizability={error_polarizability:8.2f} eps0"
+        )
+    elif log_errors == "PerAtomRMSE":
         error_e = eval_metrics["rmse_e_per_atom"] * 1e3
         error_f = eval_metrics["rmse_f"] * 1e3
         logging.info(
@@ -76,9 +166,16 @@ def valid_err_log(
         error_e = eval_metrics["rmse_e_per_atom"] * 1e3
         error_f = eval_metrics["rmse_f"] * 1e3
         error_stress = eval_metrics["rmse_stress"] * 1e3
-        logging.info(
-            f"{inintial_phrase}: head: {valid_loader_name}, loss={valid_loss:8.8f}, RMSE_E_per_atom={error_e:8.2f} meV, RMSE_F={error_f:8.2f} meV / A, RMSE_stress={error_stress:8.2f} meV / A^3",
+        errors_magforces = None
+        if "rmse_magf" in eval_metrics.keys():
+            errors_magforces = eval_metrics["rmse_magf"] * 1e3
+        msg = f"{inintial_phrase}: head: {valid_loader_name}, loss={valid_loss:8.8f}, RMSE_E_per_atom={error_e:8.2f} meV, RMSE_F={error_f:8.2f} meV / A, RMSE_stress={error_stress:8.2f} meV / A^3"
+        msg += (
+            f", RMSE_magforces={errors_magforces:8.2f} meV / μB"
+            if errors_magforces is not None
+            else ""
         )
+        logging.info(msg)
     elif (
         log_errors == "PerAtomRMSEstressvirials"
         and eval_metrics["rmse_virials_per_atom"] is not None
@@ -97,7 +194,7 @@ def valid_err_log(
         error_f = eval_metrics["mae_f"] * 1e3
         error_stress = eval_metrics["mae_stress"] * 1e3
         logging.info(
-            f"{inintial_phrase}: loss={valid_loss:8.8f}, MAE_E_per_atom={error_e:8.2f} meV, MAE_F={error_f:8.2f} meV / A, MAE_stress={error_stress:8.2f} meV / A^3"
+            f"{inintial_phrase}: head: {valid_loader_name}, loss={valid_loss:8.8f}, MAE_E_per_atom={error_e:8.2f} meV, MAE_F={error_f:8.2f} meV / A, MAE_stress={error_stress:8.2f} meV / A^3"
         )
     elif (
         log_errors == "PerAtomMAEstressvirials"
@@ -107,7 +204,7 @@ def valid_err_log(
         error_f = eval_metrics["mae_f"] * 1e3
         error_virials = eval_metrics["mae_virials"] * 1e3
         logging.info(
-            f"{inintial_phrase}: loss={valid_loss:8.8f}, MAE_E_per_atom={error_e:8.2f} meV, MAE_F={error_f:8.2f} meV / A, MAE_virials={error_virials:8.2f} meV"
+            f"{inintial_phrase}: head: {valid_loader_name}, loss={valid_loss:8.8f}, MAE_E_per_atom={error_e:8.2f} meV, MAE_F={error_f:8.2f} meV / A, MAE_virials={error_virials:8.2f} meV"
         )
     elif log_errors == "TotalRMSE":
         error_e = eval_metrics["rmse_e"] * 1e3
@@ -145,22 +242,6 @@ def valid_err_log(
         logging.info(
             f"{inintial_phrase}: head: {valid_loader_name}, loss={valid_loss:8.8f}, RMSE_E_per_atom={error_e:8.2f} meV, RMSE_F={error_f:8.2f} meV / A, RMSE_Mu_per_atom={error_mu:8.2f} mDebye",
         )
-    elif (
-        log_errors == "PerAtomFieldRMSE"
-        and eval_metrics["rmse_stress"] is not None
-        and eval_metrics["rmse_becs"] is not None
-        and eval_metrics["rmse_polarization"] is not None
-        and eval_metrics["rmse_polarizability"] is not None
-    ):
-        error_e = eval_metrics["rmse_e_per_atom"] * 1e3
-        error_f = eval_metrics["rmse_f"] * 1e3
-        error_stress = eval_metrics["rmse_stress"] * 1e3
-        error_polarization = eval_metrics["rmse_polarization"] * 1e3
-        error_becs = eval_metrics["rmse_becs"]
-        error_polarizability = eval_metrics["rmse_polarizability"]
-        logging.info(
-            f"{inintial_phrase}: head: {valid_loader_name}, loss={valid_loss:8.8f}, RMSE_E_per_atom={error_e:8.8f} meV, RMSE_F={error_f:8.8f} meV / A, RMSE_stress={error_stress:8.8f} meV / A^3, RMSE_polarization={error_polarization:8.8f} m|e| / A^2, RMSE_becs={error_becs:8.8f} |e|, RMSE_polarizability={error_polarizability:8.8f} ε0",
-        )
 
 
 def train(
@@ -189,6 +270,7 @@ def train(
     distributed_model: Optional[DistributedDataParallel] = None,
     train_sampler: Optional[DistributedSampler] = None,
     rank: Optional[int] = 0,
+    data_aug_magmom: Optional[bool] = False,
 ):
     lowest_loss = np.inf
     valid_loss = np.inf
@@ -223,6 +305,13 @@ def train(
 
     # variable used for broadcast by rank == 0 if epoch loop is exited early, e.g. patience
     exit_now = torch.zeros(1, device=device) if distributed else None
+
+    if data_aug_magmom:
+        # pylint: disable=cyclic-import
+        from mace.data.augmentation import create_random_rotation_loader
+
+        train_loader = create_random_rotation_loader(train_loader)
+
     while epoch < max_num_epochs:
         # LR scheduler and SWA update
         if swa is None or epoch < swa.start:
@@ -246,6 +335,7 @@ def train(
             train_sampler.set_epoch(epoch)
         if "ScheduleFree" in type(optimizer).__name__:
             optimizer.train()
+
         train_one_epoch(
             model=model,
             loss_fn=loss_fn,
@@ -297,11 +387,12 @@ def train(
                             wandb_log_dict[valid_loader_name] = {
                                 "epoch": epoch,
                                 "valid_loss": valid_loss_head,
-                                "valid_rmse_e_per_atom": eval_metrics[
-                                    "rmse_e_per_atom"
-                                ],
-                                "valid_rmse_f": eval_metrics["rmse_f"],
                             }
+                            for metric_name, metric_value in eval_metrics.items():
+                                if metric_name not in {"mode", "epoch", "head"}:
+                                    wandb_log_dict[valid_loader_name][
+                                        f"valid_{metric_name}"
+                                    ] = metric_value
                 if plotter and epoch % plotter.plot_frequency == 0:
                     try:
                         plotter.plot(epoch, model_to_evaluate, rank)
@@ -398,8 +489,9 @@ def train_one_epoch(
         opt_metrics["epoch"] = epoch
         if rank == 0:
             logger.log(opt_metrics)
+        return False
     else:
-        for batch in data_loader:
+        for update_idx, batch in enumerate(data_loader):
             _, opt_metrics = take_step(
                 model=model_to_train,
                 loss_fn=loss_fn,
@@ -432,29 +524,8 @@ def take_step(
 
     def closure():
         optimizer.zero_grad(set_to_none=True)
-        if (
-            output_args["polarization"]
-            or output_args["becs"]
-            or output_args["polarizability"]
-        ):
-            output = model(
-                batch_dict,
-                training=True,
-                compute_force=output_args["forces"],
-                compute_virials=output_args["virials"],
-                compute_stress=output_args["stress"],
-                compute_polarization=output_args["polarization"],
-                compute_becs=output_args["becs"],
-                compute_polarizability=output_args["polarizability"],
-            )
-        else:
-            output = model(
-                batch_dict,
-                training=True,
-                compute_force=output_args["forces"],
-                compute_virials=output_args["virials"],
-                compute_stress=output_args["stress"],
-            )
+        kwargs = _model_output_kwargs(batch, output_args, training=True)
+        output = model(batch_dict, **kwargs)
         loss = loss_fn(pred=output, ref=batch)
         loss.backward()
         if max_grad_norm is not None:
@@ -522,29 +593,8 @@ def take_step_lbfgs(
         for batch in data_loader:
             batch = batch.to(device)
             batch_dict = batch.to_dict()
-            if (
-                output_args["polarization"]
-                or output_args["becs"]
-                or output_args["polarizability"]
-            ):
-                output = model(
-                    batch_dict,
-                    training=True,
-                    compute_force=output_args["forces"],
-                    compute_virials=output_args["virials"],
-                    compute_stress=output_args["stress"],
-                    compute_polarization=output_args["polarization"],
-                    compute_becs=output_args["becs"],
-                    compute_polarizability=output_args["polarizability"],
-                )
-            else:
-                output = model(
-                    batch_dict,
-                    training=True,
-                    compute_force=output_args["forces"],
-                    compute_virials=output_args["virials"],
-                    compute_stress=output_args["stress"],
-                )
+            kwargs = _model_output_kwargs(batch, output_args, training=True)
+            output = model(batch_dict, **kwargs)
             batch_loss = loss_fn(pred=output, ref=batch)
             batch_loss = batch_loss * (batch.num_graphs / total_sample_count)
 
@@ -588,6 +638,22 @@ def take_step_lbfgs(
     return loss, loss_dict
 
 
+# Keep parameters frozen/active after evaluation
+@contextmanager
+def preserve_grad_state(model):
+    # save the original requires_grad state for all parameters
+    requires_grad_backup = {param: param.requires_grad for param in model.parameters()}
+    try:
+        # temporarily disable gradients for all parameters
+        for param in model.parameters():
+            param.requires_grad = False
+        yield  # perform evaluation here
+    finally:
+        # restore the original requires_grad states
+        for param, requires_grad in requires_grad_backup.items():
+            param.requires_grad = requires_grad
+
+
 def evaluate(
     model: torch.nn.Module,
     loss_fn: torch.nn.Module,
@@ -595,46 +661,21 @@ def evaluate(
     output_args: Dict[str, bool],
     device: torch.device,
 ) -> Tuple[float, Dict[str, Any]]:
-    for param in model.parameters():
-        param.requires_grad = False
 
     metrics = MACELoss(loss_fn=loss_fn).to(device)
 
     start_time = time.time()
-    for batch in data_loader:
-        batch = batch.to(device)
-        batch_dict = batch.to_dict()
-        if (
-            output_args["polarization"]
-            or output_args["becs"]
-            or output_args["polarizability"]
-        ):
-            output = model(
-                batch_dict,
-                training=True,
-                compute_force=output_args["forces"],
-                compute_virials=output_args["virials"],
-                compute_stress=output_args["stress"],
-                compute_polarization=output_args["polarization"],
-                compute_becs=output_args["becs"],
-                compute_polarizability=output_args["polarizability"],
-            )
-        else:
-            output = model(
-                batch_dict,
-                training=False,
-                compute_force=output_args["forces"],
-                compute_virials=output_args["virials"],
-                compute_stress=output_args["stress"],
-            )
-        avg_loss, aux = metrics(batch, output)
 
+    with preserve_grad_state(model):
+        for batch in data_loader:
+            batch = batch.to(device)
+            batch_dict = batch.to_dict()
+            kwargs = _model_output_kwargs(batch, output_args, training=False)
+            output = model(batch_dict, **kwargs)
+            avg_loss, aux = metrics(batch, output)
     avg_loss, aux = metrics.compute()
     aux["time"] = time.time() - start_time
     metrics.reset()
-
-    for param in model.parameters():
-        param.requires_grad = True
 
     return avg_loss, aux
 
@@ -681,9 +722,26 @@ class MACELoss(Metric):
         self.add_state(
             "delta_polarizability_per_atom", default=[], dist_reduce_fx="cat"
         )
+        self.add_state(
+            "delta_polarizability_log_eigenvalue",
+            default=[],
+            dist_reduce_fx="cat",
+        )
+
+        self.add_state(
+            "MagFs_computed", default=torch.tensor(0.0), dist_reduce_fx="sum"
+        )
+        self.add_state("MagFs", default=[], dist_reduce_fx="cat")
+        self.add_state("delta_MagFs", default=[], dist_reduce_fx="cat")
 
     def update(self, batch, output):  # pylint: disable=arguments-differ
-        loss = self.loss_fn(pred=output, ref=batch)
+        # Validation is evaluated independently by every distributed rank.
+        # Avoid per-batch DDP reductions here: response derivatives can make
+        # individual batches take very different amounts of time, so a
+        # reduction inside the loss can leave faster ranks waiting for the
+        # slowest rank until NCCL times out.  MACELoss synchronizes its
+        # accumulated states once in ``compute()`` below.
+        loss = self.loss_fn(pred=output, ref=batch, ddp=False)
         self.total_loss += loss
         self.num_data += batch.num_graphs
 
@@ -703,6 +761,17 @@ class MACELoss(Metric):
                 self.delta_fs,
                 batch.weight,
                 batch.forces_weight,
+                spread_atoms=True,
+            )
+
+        if output.get("magforces") is not None and batch.magforces is not None:
+            self.MagFs.append(batch.magforces)
+            self.delta_MagFs.append(batch.magforces - output["magforces"])
+            self.MagFs_computed += filter_nonzero_weight(
+                batch,
+                self.delta_MagFs,
+                batch.weight,
+                batch.magforces_weight,
                 spread_atoms=True,
             )
         if output.get("stress") is not None and batch.stress is not None:
@@ -769,6 +838,17 @@ class MACELoss(Metric):
             output.get("polarizability") is not None
             and batch.polarizability is not None
         ):
+            log_eigenvalue_error = polarizability_log_eigenvalue_error(
+                batch.polarizability, output["polarizability"]
+            )
+            polarizability_active = torch.any(
+                batch.weight.view(-1, 1, 1) * batch.polarizability_weight > 0,
+                dim=(-1, -2),
+            )
+            if torch.any(polarizability_active):
+                self.delta_polarizability_log_eigenvalue.append(
+                    log_eigenvalue_error[polarizability_active]
+                )
             self.delta_polarizability.append(
                 batch.polarizability - output["polarizability"]
             )
@@ -822,6 +902,14 @@ class MACELoss(Metric):
             aux["rmse_f"] = compute_rmse(delta_fs)
             aux["rel_rmse_f"] = compute_rel_rmse(delta_fs, fs)
             aux["q95_f"] = compute_q95(delta_fs)
+        if self.MagFs_computed:
+            MagFs = self.convert(self.MagFs)
+            delta_MagFs = self.convert(self.delta_MagFs)
+            aux["mae_magf"] = compute_mae(delta_MagFs)
+            aux["rel_mae_magf"] = compute_rel_mae(delta_MagFs, MagFs)
+            aux["rmse_magf"] = compute_rmse(delta_MagFs)
+            aux["rel_rmse_magf"] = compute_rel_rmse(delta_MagFs, MagFs)
+            aux["q95_magf"] = compute_q95(delta_MagFs)
         if self.stress_computed:
             delta_stress = self.convert(self.delta_stress)
             aux["mae_stress"] = compute_mae(delta_stress)
@@ -877,5 +965,14 @@ class MACELoss(Metric):
                 delta_polarizability_per_atom
             )
             aux["q95_polarizability"] = compute_q95(delta_polarizability)
+            delta_polarizability_log_eigenvalue = self.convert(
+                self.delta_polarizability_log_eigenvalue
+            )
+            aux["mae_polarizability_log_eigenvalue"] = compute_mae(
+                delta_polarizability_log_eigenvalue
+            )
+            aux["rmse_polarizability_log_eigenvalue"] = compute_rmse(
+                delta_polarizability_log_eigenvalue
+            )
 
         return aux["loss"], aux

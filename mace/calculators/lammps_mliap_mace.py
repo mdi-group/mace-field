@@ -9,6 +9,8 @@ import torch
 from ase.data import chemical_symbols
 from e3nn.util.jit import compile_mode
 
+from mace.modules.extensions import is_macefield_model
+
 try:
     from lammps.mliap.mliap_unified_abc import MLIAPUnified
 except ImportError:
@@ -29,12 +31,6 @@ class MACELammpsConfig:
         self.allow_cpu = self._get_env_bool("MACE_ALLOW_CPU", False)
         self.force_cpu = self._get_env_bool("MACE_FORCE_CPU", False)
 
-        # ---- Minimal E-field addition (env-driven) ----
-        # default behaviour: read from env every step
-        self.efield_mode = os.environ.get("MACE_EFIELD_MODE", "env").strip().lower()
-        self.electric_field = self._get_env_vec3("MACE_EFIELD", (0.0, 0.0, 0.0))
-        self.efield_debug = self._get_env_bool("MACE_EFIELD_DEBUG", False)
-
     @staticmethod
     def _get_env_bool(var_name: str, default: bool) -> bool:
         return os.environ.get(var_name, str(default)).lower() in (
@@ -43,31 +39,6 @@ class MACELammpsConfig:
             "t",
             "yes",
         )
-
-    @staticmethod
-    def _get_env_vec3(
-        var_name: str, default: Tuple[float, float, float]
-    ) -> Tuple[float, float, float]:
-        raw = os.environ.get(var_name, None)
-        if raw is None or str(raw).strip() == "":
-            return default
-        s = str(raw).strip().replace(",", " ")
-        parts = [p for p in s.split() if p]
-        if len(parts) != 3:
-            raise ValueError(
-                f"{var_name} must have 3 components, got {len(parts)} from: {raw!r}. "
-                f"Use e.g. '{var_name}=0 0 0.3' or '{var_name}=0,0,0.3'."
-            )
-        try:
-            return (float(parts[0]), float(parts[1]), float(parts[2]))
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"Failed to parse {var_name}={raw!r} as 3 floats") from exc
-
-    @staticmethod
-    def get_env_vec3(
-        var_name: str, default: Tuple[float, float, float]
-    ) -> Tuple[float, float, float]:
-        return MACELammpsConfig._get_env_vec3(var_name, default)
 
 
 @contextmanager
@@ -107,6 +78,17 @@ class MACEEdgeForcesWrapper(torch.nn.Module):
                 "total_spin", torch.tensor([1.0], dtype=torch.get_default_dtype())
             ),
         )
+        self.is_macefield: bool = is_macefield_model(model)
+        electric_field = kwargs.get("electric_field", None)
+        self.electric_field_is_set: bool = electric_field is not None
+        if electric_field is None:
+            electric_field = (0.0, 0.0, 0.0)
+        electric_field = torch.as_tensor(electric_field, dtype=self.r_max.dtype).view(
+            -1, 3
+        )
+        if electric_field.shape[0] != 1:
+            raise ValueError("electric_field must be a single 3-vector")
+        self.register_buffer("electric_field", electric_field)
 
         if not hasattr(model, "heads"):
             model.heads = ["Default"]
@@ -125,17 +107,37 @@ class MACEEdgeForcesWrapper(torch.nn.Module):
         data["head"] = self.head
         data["total_charge"] = self.total_charge
         data["total_spin"] = self.total_spin
+        if self.is_macefield:
+            data["electric_field"] = self.electric_field.to(
+                device=data["vectors"].device, dtype=data["vectors"].dtype
+            )
 
-        out = self.model(
-            data,
-            training=False,
-            compute_force=False,
-            compute_virials=False,
-            compute_stress=False,
-            compute_displacement=False,
-            compute_edge_forces=True,
-            lammps_mliap=True,
-        )
+        if self.is_macefield:
+            out = self.model(
+                data,
+                training=False,
+                compute_force=False,
+                compute_virials=False,
+                compute_stress=False,
+                compute_displacement=False,
+                compute_edge_forces=True,
+                lammps_mliap=True,
+                electric_field=data["electric_field"],
+                compute_polarization=False,
+                compute_becs=False,
+                compute_polarizability=False,
+            )
+        else:
+            out = self.model(
+                data,
+                training=False,
+                compute_force=False,
+                compute_virials=False,
+                compute_stress=False,
+                compute_displacement=False,
+                compute_edge_forces=True,
+                lammps_mliap=True,
+            )
 
         node_energy = out["node_energy"]
         pair_forces = out["edge_forces"]
@@ -164,12 +166,6 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
         self.initialized = False
         self.step = 0
 
-        # ---- Minimal E-field addition ----
-        self.electric_field = torch.tensor(
-            self.config.electric_field, dtype=self.dtype
-        ).view(1, 3)
-        self._efield_raw = None
-
     def _initialize_device(self, data):
         using_kokkos = "kokkos" in data.__class__.__module__.lower()
 
@@ -184,28 +180,31 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
 
         self.device = device
         self.model = self.model.to(device)
-        # ---- keep efield tensor on same device ----
-        self.electric_field = self.electric_field.to(device=device, dtype=self.dtype)
-
         logging.info(f"MACE model initialized on device: {device}")
         self.initialized = True
 
-    def _update_electric_field_from_env_each_step(self):
-        if self.config.efield_mode != "env":
+    def _check_ghost_exchange_support(self, data):
+        """Fail early when the build cannot exchange ghost node features.
+
+        Every interaction layer past the first needs the node features of the
+        ghost atoms, which only LAMMPS can fill in. The call that does it,
+        ``forward_exchange``, exists solely in the KOKKOS coupling
+        (``src/KOKKOS/mliap_unified_couple_kokkos.pyx``); the plain ML-IAP
+        ``MLIAPDataPy`` has no such method, so a stock non-KOKKOS build used
+        to reach the second layer and die there on a bare ``AttributeError``
+        with nothing pointing at the build.
+        """
+        num_interactions = int(self.model.num_interactions)
+        if num_interactions <= 1 or hasattr(data, "forward_exchange"):
             return
-
-        raw = os.environ.get("MACE_EFIELD", "")
-        if raw == self._efield_raw:
-            return
-        self._efield_raw = raw
-
-        ex, ey, ez = self.config.get_env_vec3("MACE_EFIELD", self.config.electric_field)
-        self.electric_field[0, 0] = float(ex)
-        self.electric_field[0, 1] = float(ey)
-        self.electric_field[0, 2] = float(ez)
-
-        if self.config.efield_debug:
-            print(f"Electric field: {self.electric_field} {raw!r}", flush=True)
+        raise RuntimeError(
+            f"This MACE model has {num_interactions} interaction layers, so it "
+            f"needs LAMMPS to exchange ghost-atom features between layers, but "
+            f"{type(data).__module__}.{type(data).__name__} provides no "
+            f"forward_exchange(). That call only exists in LAMMPS's KOKKOS "
+            f"ML-IAP coupling: rebuild LAMMPS with -D PKG_KOKKOS=yes and run "
+            f"it with '-k on -sf kk', or export a single-layer model."
+        )
 
     def compute_forces(self, data):
         natoms = data.nlocal
@@ -216,12 +215,10 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
 
         if not self.initialized:
             self._initialize_device(data)
+            self._check_ghost_exchange_support(data)
 
         self.step += 1
         self._manage_profiling()
-
-        # ---- update E-field each step (cheap) ----
-        self._update_electric_field_from_env_each_step()
 
         if natoms == 0 or npairs <= 1:
             return
@@ -241,7 +238,7 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
 
     def _prepare_batch(self, data, natoms, nghosts, species):
         """Prepare the input batch for the MACE model."""
-        batch = {
+        return {
             "vectors": torch.as_tensor(data.rij).to(self.dtype).to(self.device),
             "node_attrs": torch.nn.functional.one_hot(
                 species.to(self.device), num_classes=self.num_species
@@ -258,22 +255,14 @@ class LAMMPS_MLIAP_MACE(MLIAPUnified):
             "natoms": (natoms, nghosts),
         }
 
-        # ---- Minimal E-field addition: only attach when enabled ----
-        if self.config.efield_mode == "env":
-            batch["electric_field"] = self.electric_field
-
-        return batch
-
     def _update_lammps_data(self, data, atom_energies, pair_forces, natoms):
         """Update LAMMPS data structures with computed energies and forces."""
         if self.dtype == torch.float32:
             pair_forces = pair_forces.double()
         eatoms = torch.as_tensor(data.eatoms)
-        eatoms.copy_(atom_energies[:natoms])
-
-        # ---- make this a python float; avoids autograd warning / surprises ----
-        data.energy = atom_energies[:natoms].sum().detach().item()
-
+        atom_energies_real = atom_energies[:natoms].detach()
+        eatoms.copy_(atom_energies_real)
+        data.energy = atom_energies_real.sum().item()
         data.update_pair_forces_gpu(pair_forces)
 
     def _manage_profiling(self):

@@ -2,48 +2,49 @@
   <img src="macefield_logo.png" alt="MACE-Field logo" width="600">
 </p>
 
+# MACE-Field: Electric-Field-Aware MACE Models
 
-# MACE-Field: Electric-Field–Aware MACE Models
+MACE-Field extends the [MACE](https://github.com/ACEsuit/mace) architecture with a
+uniform electric-field input. It learns a scalar electric enthalpy for molecules
+and periodic materials and obtains polarization, Born effective charges, and
+polarizability by differentiating that same scalar.
 
-**MACE-Field** extends the [MACE](https://github.com/ACEsuit/mace) architecture to learn **electric-field–dependent energy functionals** for molecules and periodic materials. From a *single scalar electric enthalpy*, MACE-Field exposes **dielectric response observables** via **automatic differentiation**, ensuring derivative consistency by construction.
+This repository contains the MACE-Field extension on top of the current MACE
+architecture. It supports training from scratch, fine-tuning MACE foundation
+models, ASE inference, and batch evaluation.
 
-> **Status**  
-> This repository tracks development of MACE-Field while it is being upstreamed into MACE:  
-> https://github.com/ACEsuit/mace/pull/1177
+## What MACE-Field provides
 
----
+For an energy functional \(E(\mathbf{R}, \mathbf{\mathcal{E}})\), the model can
+return:
 
-## What you get
+- Polarization:
+  \( \mathbf{P} = -\frac{1}{\Omega}
+  \frac{\partial E}{\partial \mathbf{\mathcal{E}}} \)
+- Born effective charges:
+  \( Z^*_{\kappa,\alpha\beta} =
+  \frac{\partial P_\alpha}{\partial R_{\kappa,\beta}} \)
+- Polarizability/susceptibility:
+  \( \chi_{\alpha\beta} =
+  \frac{\partial P_\alpha}{\partial \mathcal{E}_\beta} \)
 
-Given an electric enthalpy $E(\mathbf{R}, \mathbf{E})$ (or $H(\mathbf{R}, \mathbf{E})$ depending on convention), MACE-Field can produce:
-
-- **Polarization**  
-  $\mathbf{P} = -\frac{1}{\Omega}\,\frac{\partial E}{\partial \mathbf{E}}$
-
-- **Born effective charges (BECs)**  
-  $Z^\ast_{\kappa,\alpha\beta} = \frac{\partial P_\alpha}{\partial R_{\kappa,\beta}}$
-
-- **Polarizability/susceptibility**  
-  $\chi_{\alpha\beta} = \frac{\partial P_\alpha}{\partial E_\beta}$
-
-All quantities are **derivative-consistent** (Maxwell relations, acoustic sum rule, etc.) because they come from differentiating the same scalar.
-
-MACE-Field supports:
-- training **from scratch**, and
-- **fine-tuning** existing MACE foundation models to become field-aware.
-
----
+The response quantities are derivatives of one scalar model output, so the
+energy, forces, and field response remain mutually consistent. At zero field,
+the added field coupling contributes zero, allowing the MACE backbone to be
+initialized from a foundation model.
 
 ## Installation
 
-```bash
+~~~bash
 git clone https://github.com/mdi-group/mace-field.git
-pip install ./mace-field
-```
+cd mace-field
+python -m pip install -e .
+~~~
 
----
+The generic MACE installation, training, CUDA, and foundation-model guides are
+available in the [MACE documentation](https://mace-docs.readthedocs.io/).
 
-## Pretrained MACE-Field Foundation model
+## Pretrained MACE-Field foundation model
 
 The [package releases](https://github.com/mdi-group/mace-field/releases/tag/1.0.2) contain a [MACE-Field foundation model](https://github.com/mdi-group/mace-field/releases/download/1.0.2/MACEField-MH-0-omat-dielectric.model). The backbone comes from the [MACE multihead MP-0 foundation model](https://github.com/ACEsuit/mace-foundations/releases/tag/mace_mh_1), which was fine-tuned to be field-aware using MACE-Field with datasets: `MP-Dielectric` (BEC and polarizability labels) and `MP-Ferroelectric` (Berry-polarization branch labels).
 
@@ -51,235 +52,318 @@ This MACE-Field foundation model can be finetuned further using the provided [ex
 
 ---
 
-## Architecture summary
+## Architecture
 
 ![MACE-Field architecture](macefield_architecture.png)
 
-MACE-Field preserves the standard MACE backbone and readout, but **injects a uniform electric field** (an $O(3)$ irrep `1o`) into the latent equivariant features at each interaction layer.
-
-Conceptually:
-1. Local atomic neighbourhoods are expanded into equivariant features (as in MACE/ACE).
-2. A **global electric field** couples to these features through symmetry-allowed tensor products.
-3. The model still outputs a **scalar energy** (electric enthalpy).
-4. Dielectric observables are obtained by **exact differentiation** of this scalar.
-
-At **zero field**, MACE-Field reduces to standard MACE, allowing for the reuse of foundation weights.
-
----
+MACE-Field is implemented as an extension of <code>ScaleShiftMACE</code> in
+<code>mace.modules.extensions</code>. The uniform electric field is represented
+as the equivariant <code>1o</code> irrep and is coupled to the latent features
+between interaction layers. The standard MACE energy readout remains the scalar
+output.
 
 ## Data format
 
-MACE-Field uses ASE-readable datasets (typically **extended XYZ / extxyz**).
+Training data are ASE-readable configurations, normally extended XYZ files.
+The default keys are:
 
-### Required configuration-level fields (`atoms.info`)
-
-| Key | Shape | Units |
-|---|---:|---|
-| `REF_energy` | scalar | eV |
-| `REF_stress` or `REF_virials` | (6,) or (3,3) | eV/Å³ (stress) or eV (virials) |
-| `REF_electric_field` | (3,) | V/Å |
-| `REF_polarization` | (3,) | e/Å² |
-| `REF_polarizability` | (3,3) or (9,) | e/(V·Å) |
-
-### Required per-atom arrays (`atoms.arrays`)
+### Configuration-level values (<code>atoms.info</code>)
 
 | Key | Shape | Units |
-|---|---:|---|
-| `REF_forces` | (N,3) | eV/Å |
-| `REF_becs` | (N,3,3) | e |
+| --- | --- | --- |
+| <code>REF_energy</code> | scalar | eV |
+| <code>REF_stress</code> | <code>(6,)</code> or <code>(3, 3)</code> | eV/Å³ |
+| <code>REF_virials</code> | <code>(6,)</code> or <code>(3, 3)</code> | eV |
+| <code>REF_electric_field</code> | <code>(3,)</code> | V/Å |
+| <code>REF_polarization</code> | <code>(3,)</code> | e/Å² |
+| <code>REF_polarizability</code> | <code>(3, 3)</code> or <code>(9,)</code> | e/(V·Å) |
+| <code>head</code> | string | multi-head name |
 
-> Key names can be overridden via CLI/config flags.
+### Per-atom arrays (<code>atoms.arrays</code>)
 
----
+| Key | Shape | Units |
+| --- | --- | --- |
+| <code>REF_forces</code> | <code>(N, 3)</code> | eV/Å |
+| <code>REF_becs</code> | <code>(N, 3, 3)</code> or <code>(N, 9)</code> | e |
 
-## Training a MACE-Field model
+Field targets are required only for the corresponding nonzero loss terms.
+Missing field values are represented internally by zeros, but they should not
+be used with a nonzero target weight. Key names can be changed with the
+<code>*_key</code> training options.
 
-Training uses the standard MACE CLI with:
-- `--model MACEField`
-- `--loss universal_field`
+## Training from scratch
 
-```bash
-python -m mace.scripts.run_train \
-  --model MACEField \
-  --name MACEField_model \
-  --train_file data/field_train.xyz \
-  --valid_fraction 0.2 \
-  --device cuda \
-  --r_max 5.0 \
-  --num_interactions 2 \
-  --num_channels 128 \
-  --max_L 1 \
-  --loss universal_field \
-  --energy_weight 1.0 \
-  --forces_weight 100.0 \
-  --polarization_weight 1.0 \
-  --becs_weight 100.0 \
-  --polarizability_weight 100.0
-```
+Use the standard MACE training CLI with the <code>MACEField</code> model and
+<code>universal_field</code> loss:
 
-### Polarization branch folding (periodic systems)
+~~~bash
+mace_run_train \
+  --name=MACEField_model \
+  --model=MACEField \
+  --loss=universal_field \
+  --train_file=data/field_train.xyz \
+  --valid_fraction=0.2 \
+  --r_max=5.0 \
+  --num_interactions=2 \
+  --num_channels=128 \
+  --max_L=1 \
+  --compute_forces=True \
+  --compute_stress=True \
+  --compute_polarization=True \
+  --compute_becs=True \
+  --compute_polarizability=True \
+  --energy_weight=1.0 \
+  --forces_weight=100.0 \
+  --stress_weight=1.0 \
+  --polarization_weight=1.0 \
+  --becs_weight=100.0 \
+  --polarizability_weight=100.0 \
+  --device=cuda
+~~~
 
-Polarization is multi-valued under lattice translations. During training, MACE-Field compares **folded polarization differences**, which:
-- avoids branch discontinuities,
-- supports ferroelectric switching paths,
-- preserves conservative/derivative definitions.
+The equivalent source checkout command is:
 
----
+~~~bash
+python -m mace.cli.run_train [the same options]
+~~~
 
-## Fine-tuning a MACE foundation model (field-aware)
+For periodic systems, the default <code>UniversalFieldLoss</code> folds
+polarization differences using the cell lattice so that equivalent polarization
+branches do not produce artificial discontinuities.
 
-One of MACE-Field’s key strengths is **foundation-model inheritance**. You can fine-tune a pretrained MACE model (e.g. `mace-mp-0b3`) to add polarization/BEC/polarisability behaviour with minimal loss of energy/force accuracy.
+### Replay pseudolabels
 
-### Multi-head fine-tuning example
+<code>--pseudolabel_replay</code> generates energy and force labels from the
+foundation model, and includes stress/virial labels according to the existing
+replay options. Polarization, BEC, and polarizability pseudolabels are enabled
+with <code>--compute_polarization</code>, <code>--compute_becs</code>, and
+<code>--compute_polarizability</code>; requesting either BECs or polarizability
+also requests polarization.
 
-```yaml
-name: mace-field-mp-0b3-mh
-foundation_model: mace-mp-0b3-medium.model
-model: MACEField
-loss: universal_field
-multiheads_finetuning: true
+The source checkpoint must itself be MACEField to generate field responses.
+MACE-MH-1 is a plain MACE foundation model: it can provide replay energy,
+forces, and stress, but it cannot fabricate response labels. A plain source
+therefore receives an explicit warning and remains an energy/force/stress-only
+replay source. Generated labels are assigned active property weights when the
+replayed configuration did not already have them.
 
-heads:
-  mp-dielectric:
-    train_file: becs-polarizabilities-train.xyz
-    valid_file: becs-polarizabilities-valid.xyz
-  mp-polarization:
-    train_file: polarizations-train.xyz
-    valid_file: polarizations-valid.xyz
+## Fine-tuning MACE-MH-1
 
-pt_train_file: mp_replay.xyz
-compute_forces: true
-compute_polarization: true
-compute_becs: true
-compute_polarizability: true
-```
+MACE-MH-1 is a multi-head foundation model. Download the checkpoint from the
+[MACE foundation-model release](https://github.com/ACEsuit/mace-foundations/releases/tag/mace_mh_1)
+and select the head appropriate for the target data. For example,
+<code>omat_pbe</code> is a suitable starting head for OMAT-like inorganic-material
+data.
 
-Run:
+The following fine-tunes one selected MH-1 head into a one-head MACE-Field model:
 
-```bash
-torchrun --standalone --nproc_per_node=gpu \
-  python -m mace.scripts.run_train --config config.yaml
-```
+~~~bash
+mace_run_train \
+  --name=MACEField-MH-1-omat \
+  --foundation_model=/path/to/mace-mh-1.model \
+  --foundation_head=omat_pbe \
+  --foundation_model_elements=False \
+  --foundation_model_readout=True \
+  --multiheads_finetuning=False \
+  --model=MACEField \
+  --loss=universal_field \
+  --train_file=data/field_train.xyz \
+  --valid_file=data/field_valid.xyz \
+  --E0s=estimated \
+  --compute_forces=True \
+  --compute_stress=True \
+  --compute_polarization=True \
+  --compute_becs=True \
+  --compute_polarizability=True \
+  --device=cuda
+~~~
 
----
+The foundation model's interaction, radial, product, and ordinary energy-readout
+parameters are transferred when their shapes are compatible. The MACE-Field
+field-coupling parameters are then trained with the selected response targets.
+Set <code>--foundation_model_elements=True</code> when the target model must
+retain all foundation elements.
+
+For replay-based multi-head fine-tuning, set
+<code>--multiheads_finetuning=True</code>, provide <code>--pt_train_file</code>,
+and define the new head(s) with <code>--heads</code>. The pretrained head is
+selected with <code>--foundation_head</code>. MACEField keeps the
+<code>universal_field</code> loss in this mode and enables field outputs for
+nonzero field-loss weights.
 
 ## Inference
 
 ### ASE calculator
 
-```python
+~~~python
 from mace.calculators import MACECalculator
 
 calc = MACECalculator(
-    model_path="MACEField.model",
+    model_paths=["MACEField.model"],
     model_type="MACEField",
-    electric_field=[0.0, 0.0, 0.02],  # overrides per-structure field
+    electric_field=[0.0, 0.0, 0.02],  # V/Å; overrides atoms.info
     device="cuda",
 )
 
 atoms.calc = calc
-E = atoms.get_potential_energy()
-P = atoms.calc.results["polarization"]       # (3,)
-Z = atoms.calc.results["becs"]               # (N,3,3)
-alpha = atoms.calc.results["polarizability"] # (3,3)
-```
+energy = atoms.get_potential_energy()
+polarization = calc.results["polarization"]       # (3,)
+becs = calc.results["becs"]                       # (N, 9)
+polarizability = calc.results["polarizability"]   # (9,)
+~~~
 
-### Batch inference over XYZ
+If <code>electric_field</code> is not supplied to the calculator, the field is
+read from <code>atoms.info["electric_field"]</code>, then
+<code>atoms.info["REF_electric_field"]</code>. If neither is present, a zero
+field is used. For a MACEField calculator, unspecified response-selection
+flags retain the historical default of computing polarization, BECs, and
+polarizability. To select a subset, pass for example
+<code>compute_polarization=True, compute_becs=False,
+compute_polarizability=False</code>; BECs or polarizability always imply
+polarization.
 
-```bash
+### Batch evaluation
+
+~~~bash
 mace_eval_configs \
-  --configs input.xyz \
-  --model MACEField.model \
-  --output output.xyz \
+  --configs=input.xyz \
+  --model=MACEField.model \
+  --output=output.xyz \
   --compute_polarization \
   --compute_becs \
   --compute_polarizability
-```
+~~~
 
----
+Use <code>--electric-field Ex Ey Ez</code> to apply one field to every
+configuration, regardless of the per-configuration field stored in the input
+file. The output values are written with the <code>MACE_</code> prefix by default:
 
-## Finite-field molecular dynamics (ASE)
+- <code>atoms.info["MACE_polarization"]</code>
+- <code>atoms.arrays["MACE_becs"]</code>
+- <code>atoms.info["MACE_polarizability"]</code>
 
-```python
+### Finite-field ASE workflows
+
+~~~python
 atoms.info["REF_electric_field"] = [0.0, 0.0, 0.1]
+atoms.calc = MACECalculator(
+    model_paths=["MACEField.model"],
+    model_type="MACEField",
+    device="cuda",
+)
 
-# If you want a time-dependent field:
-calc.electric_field = [0.0, 0.0, Ez_t]
-```
+# A time-dependent field can be assigned before each calculation.
+atoms.calc.electric_field = [0.0, 0.0, Ez_t]
+~~~
 
-This enables workflows such as:
-- ferroelectric hysteresis loops,
-- finite-temperature dielectric response,
-- IR / Raman response driven by field/strain protocols.
+This supports finite-field relaxation, molecular dynamics, dielectric-response
+curves, and ferroelectric switching workflows. The current documented
+field-aware path is the ASE calculator; the former environment-variable example
+is not consumed by the current MLIAP wrapper.
 
----
+### Fine-tuning selection and active-learning MD
 
-## LAMMPS + MACE-Field (MLIAP)
+Descriptor-based selection accepts the same field model controls:
 
-MACE-Field can be used in **LAMMPS** via the **MLIAP** interface (including Kokkos GPU builds). The simplest and most robust way to supply a uniform field is via an environment variable read by the MLIAP Python wrapper.
+~~~bash
+mace_finetuning_select \
+  --configs_pt=pretraining.xyz \
+  --configs_ft=field_train.xyz \
+  --model=MACEField.model \
+  --model_type=MACEField \
+  --electric-field 0 0 0.02 \
+  --output=selected.xyz
+~~~
 
-### LAMMPS: constant electric field
+For committee active-learning MD, use the field controls and opt in to saving
+the response tensors:
 
-Example (Kokkos GPU, single GPU):
+~~~bash
+mace_active_learning_md \
+  --config=initial.xyz \
+  --model='MACEField_*.model' \
+  --model_type=MACEField \
+  --electric-field 0 0 0.02 \
+  --save_field_responses \
+  --output=trajectory.xyz
+~~~
 
-```bash
-export MACE_EFIELD_MODE=env \
-export MACE_EFIELD=0,0,0.3 \
-lmp -k on g 1 -sf kk -pk kokkos gpu/aware on neigh half newton on -in in.lammps_macefield
-```
+Saved response names are <code>MACE_polarization</code> and
+<code>MACE_polarizability</code> in <code>atoms.info</code>, and
+<code>MACE_becs</code> in <code>atoms.arrays</code>. The active-learning script
+uses all three response outputs when saving is enabled and no individual
+response flag was selected.
 
-This feeds $\mathbf{E} = (0, 0, 0.3)$ V/Å to MACE-Field at every MD step.
+### HDF5 and training visualisation
 
-### LAMMPS: time-dependent electric field (MACE-Field via env var)
+<code>mace_prepare_data</code> preserves the field, response, and response-weight
+tensors in the repository HDF5 format. The public HDF5 writer also accepts
+<code>AtomicData</code> objects directly, and its output can be read back by
+<code>HDF5Dataset</code>. Select <code>--error_table=PerAtomFieldRMSE</code> to
+include weighted polarization, BEC, and polarizability metrics in the training
+table and scatter plots.
 
-MACE-Field’s LAMMPS ML-IAP wrapper can take a **time-dependent** electric field by updating the environment variable `MACE_EFIELD` **every MD step** from LAMMPS equal-style variables.
+### LAMMPS export
 
-This approach keeps the wrapper simple: it only needs to **re-read `os.environ["MACE_EFIELD"]` each step**.
+Both supported export formats accept a constant field:
 
-#### 1) Define the field as LAMMPS equal-style variables
+~~~bash
+mace_create_lammps_model MACEField.model \
+  --format=libtorch --electric-field 0 0 0.02
+mace_create_lammps_model MACEField.model \
+  --format=mliap --electric-field 0 0 0.02
+~~~
 
-Define `Ex`, `Ey`, `Ez` in your `in.lammps` (here `Ez` is sinusoidal in `step`):
+The LAMMPS wrappers inject a zero field by default and store the configured
+field in the exported wrapper. Dynamic per-step field transport is not
+supported by this interface; use the ASE calculator when the field changes
+between steps.
 
-```lammps
-variable        E0     equal 0.30
-variable        period equal 2000
+<code>mace_polar_density_cube</code> is specific to PolarMACE electrostatic
+density outputs and is not a MACEField response interface.
 
-variable        Ex equal 0.0
-variable        Ey equal 0.0
-variable        Ez equal v_E0*sin(2.0*PI*step/v_period)
-```
+## Development and tests
 
-#### 2) Push `Ex,Ey,Ez` into `MACE_EFIELD` every step via `python/invoke`
+Install development dependencies and enable the repository hooks:
 
-This Python snippet runs inside LAMMPS, reads the current values using `extract_variable`, and updates `MACE_EFIELD`:
+~~~bash
+python -m pip install -e '.[dev]'
+pre-commit install
+~~~
 
-```lammps
-python set_mace_efield here """
-import os
-from lammps import lammps
+The test suite is organized by capability:
 
-def set_mace_efield(lammps_ptr):
-    lmp = lammps(ptr=lammps_ptr)
-    ex = float(lmp.extract_variable("Ex", None, 0))
-    ey = float(lmp.extract_variable("Ey", None, 0))
-    ez = float(lmp.extract_variable("Ez", None, 0))
-    os.environ["MACE_EFIELD"] = f"{ex},{ey},{ez}"
-"""
-fix mace_efield all python/invoke 1 end_of_step set_mace_efield
-```
+| Directory | Contents |
+| --- | --- |
+| <code>tests/unit</code> | Fast CPU-only unit tests |
+| <code>tests/workflows</code> | End-to-end CLI training workflows |
+| <code>tests/extensions/macefield</code> | MACE-Field extension and foundation fine-tuning |
+| <code>tests/extensions/&lt;name&gt;</code> | Other optional MACE extensions |
+| <code>tests/foundations</code> | Network-enabled foundation-model tests |
+| <code>tests/integrations</code> | External-runtime integration tests |
 
-**What this does:**
-- LAMMPS evaluates `Ex/Ey/Ez` for the **current** `step`.
-- The Python hook converts them to floats and sets `MACE_EFIELD="ex,ey,ez"`.
-- The MACE-Field LAMMPS wrapper reads `MACE_EFIELD` on the next force call and feeds it to the model.
+Run the MACE-Field suite locally with:
 
----
+~~~bash
+python -m pytest tests/extensions/macefield
+~~~
+
+Run the core CPU suites with:
+
+~~~bash
+python -m pytest tests/unit -m "not slow"
+python -m pytest tests/workflows
+~~~
+
+CI runs the MACE-Field suite as a dedicated CPU extension job. The suite uses
+small synthetic models and does not require network access or a foundation
+checkpoint download.
 
 ## References
 
-If you use this code, please cite:
+If you use MACE-Field, please cite:
 
-```bibtex
+~~~bibtex
 @article{martin2026macefield,
   title = {General Learning of the Electric Response of Inorganic Materials},
   author = {Martin, Bradley A. A. and Ganose, Alex M. and Kapil, Venkat and Li, Tingwei and Butler, Keith T.},
@@ -294,35 +378,39 @@ If you use this code, please cite:
   doi = {10.1103/b116-xy8k},
   url = {https://link.aps.org/doi/10.1103/b116-xy8k}
 }
-```
+~~~
 
 and the main MACE papers:
 
-```bibtex
+~~~bibtex
 @inproceedings{Batatia2022mace,
-  title={{MACE}: Higher Order Equivariant Message Passing Neural Networks for Fast and Accurate Force Fields},
-  author={Batatia, Ilyes and Kovacs, David Peter and Simm, Gregor N. C. and Ortner, Christoph and Csanyi, Gabor},
+  title={{MACE}: Higher Order Equivariant Message Passing Neural Networks
+         for Fast and Accurate Force Fields},
+  author={Batatia, Ilyes and Kovacs, David Peter and Simm, Gregor N. C. and
+          Ortner, Christoph and Csanyi, Gabor},
   booktitle={Advances in Neural Information Processing Systems},
   year={2022}
 }
 
 @misc{Batatia2022Design,
-  title = {The Design Space of E(3)-Equivariant Atom-Centered Interatomic Potentials},
-  author = {Batatia, Ilyes and Batzner, Simon and Kov{'a}cs, D{'a}vid P{'e}ter and Musaelian, Albert and Simm, Gregor N. C. and Drautz, Ralf and Ortner, Christoph and Kozinsky, Boris and Cs{'a}nyi, G{'a}bor},
-  year = {2022},
-  eprint = {2205.06643},
-  archiveprefix = {arXiv}
+  title={The Design Space of E(3)-Equivariant Atom-Centered Interatomic
+         Potentials},
+  author={Batatia, Ilyes and Batzner, Simon and Kovacs, David Peter and
+          Musaelian, Albert and Simm, Gregor N. C. and Drautz, Ralf and
+          Ortner, Christoph and Kozinsky, Boris and Csanyi, Gabor},
+  year={2022},
+  eprint={2205.06643},
+  archivePrefix={arXiv}
 }
-```
+~~~
 
-# Acknowledgments
+## Acknowledgments
+
 This work has been supported by UKRI funding (EP/Y000552/1 and EP/Y014405/1).
-
----
 
 ## Contact
 
-- **MACE-Field**: bradley.martin@ucl.ac.uk  
-- **MACE core**: ilyes.batatia@ens-paris-saclay.fr  
-- Issues & feature requests: https://github.com/mdi-group/mace-field/issues
-
+- MACE-Field: bradley.martin@ucl.ac.uk
+- MACE core: ilyes.batatia@ens-paris-saclay.fr
+- Issues and feature requests:
+  https://github.com/mdi-group/mace-field/issues

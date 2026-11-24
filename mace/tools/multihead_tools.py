@@ -17,8 +17,13 @@ from mace.cli.fine_tuning_select import (
 )
 from mace.data import AtomicData, KeySpecification
 from mace.data.utils import Configuration
+from mace.modules.extensions import is_macefield_model
 from mace.tools import torch_geometric
-from mace.tools.scripts_utils import SubsetCollection, get_dataset_from_xyz
+from mace.tools.scripts_utils import (
+    SubsetCollection,
+    extract_config_mace_model,
+    get_dataset_from_xyz,
+)
 from mace.tools.utils import AtomicNumberTable, get_cache_dir
 
 
@@ -102,17 +107,27 @@ def prepare_pt_head(
     foundation_model_num_neighbours: float,
 ) -> Dict[str, Any]:
     """Prepare a pretraining head from args."""
-    if (
-        args.foundation_model in ["small", "medium", "large"]
-        or args.pt_train_file == "mp"
-    ):
+    if args.foundation_model in ["small", "medium", "large"] or args.pt_train_file in [
+        "mp",
+        "omat",
+        "matpes_pbe",
+        "matpes_r2scan",
+    ]:
         logging.info(
             "Using foundation model for multiheads finetuning with Materials Project data"
         )
-        pt_keyspec.update(
-            info_keys={"energy": "energy", "stress": "stress"},
-            arrays_keys={"forces": "forces"},
-        )
+        info_keys = {"energy": "energy", "stress": "stress"}
+        arrays_keys = {"forces": "forces"}
+        if getattr(args, "model", "MACE") == "MACEField":
+            info_keys.update(
+                {
+                    "electric_field": "REF_electric_field",
+                    "polarization": "REF_polarization",
+                    "polarizability": "REF_polarizability",
+                }
+            )
+            arrays_keys["becs"] = "REF_becs"
+        pt_keyspec.update(info_keys=info_keys, arrays_keys=arrays_keys)
         pt_head = {
             "train_file": "mp",
             "E0s": "foundation",
@@ -151,6 +166,8 @@ def assemble_replay_data(
             checkpoint_url = "https://github.com/ACEsuit/mace-foundations/releases/download/mace_matpes_0/matpes-pbe-replay-data.xyz"
         elif name == "matpes_r2scan":
             checkpoint_url = "https://github.com/ACEsuit/mace-foundations/releases/download/mace_matpes_0/matpes-r2scan-replay-data.extxyz"
+        elif name == "omat":
+            checkpoint_url = "https://github.com/ACEsuit/mace-foundations/releases/download/mace_omat_0/mp_traj_combined_omat.xyz"
         else:
             raise ValueError(f"Unknown replay dataset name {name}")
 
@@ -180,7 +197,7 @@ def assemble_replay_data(
         settings = SelectionSettings(
             configs_pt=cached_dataset_path,
             output=f"mp_finetuning-{tag}.xyz",
-            atomic_numbers=atomic_numbers,
+            filter_atomic_numbers_pt=atomic_numbers,
             num_samples=args.num_samples_pt,
             seed=args.seed,
             head_pt="pbe_mp",
@@ -224,6 +241,10 @@ def generate_pseudolabels_for_configs(
     r_max: float,
     device: torch.device,
     batch_size: int,
+    force_stress: bool = False,
+    compute_polarization: bool = False,
+    compute_becs: bool = False,
+    compute_polarizability: bool = False,
 ) -> List[Configuration]:
     """
     Generate pseudolabels for a list of Configuration objects.
@@ -239,6 +260,17 @@ def generate_pseudolabels_for_configs(
     Returns:
         List of Configuration objects with updated properties
     """
+
+    if (
+        compute_polarization or compute_becs or compute_polarizability
+    ) and not is_macefield_model(model):
+        raise ValueError(
+            "Polarization, BEC, and polarizability pseudolabels require a "
+            "MACEField foundation model."
+        )
+    compute_polarization = (
+        compute_polarization or compute_becs or compute_polarizability
+    )
 
     model.eval()
     updated_configs = []
@@ -265,13 +297,19 @@ def generate_pseudolabels_for_configs(
             batch_dict = batch.to_dict()
 
             # Run model inference with computation of all properties
-            out = model(
-                batch_dict,
-                training=False,
-                compute_force=True,
-                compute_virials=True,
-                compute_stress=True,
-            )
+            model_kwargs = {
+                "training": False,
+                "compute_force": True,
+                "compute_virials": True,
+                "compute_stress": True,
+            }
+            if is_macefield_model(model):
+                model_kwargs.update(
+                    compute_polarization=compute_polarization,
+                    compute_becs=compute_becs,
+                    compute_polarizability=compute_polarizability,
+                )
+            out = model(batch_dict, **model_kwargs)
 
             # Process each configuration in the batch
             for j, config in enumerate(batch_configs):
@@ -282,10 +320,24 @@ def generate_pseudolabels_for_configs(
                 if not hasattr(config_copy, "properties"):
                     config_copy.properties = {}
 
+                if not hasattr(config_copy, "property_weights"):
+                    config_copy.property_weights = {}
+
+                original_stress_weight = config.property_weights.get("stress", 0.0)
+                original_energy_weight = config.property_weights.get("energy", 0.0)
+                original_forces_weight = config.property_weights.get("forces", 0.0)
+                had_stress = (
+                    config.properties.get("stress") is not None
+                    and original_stress_weight > 0.0
+                )
+
                 # Update config properties with pseudolabels
                 if "energy" in out and out["energy"] is not None:
                     config_copy.properties["energy"] = (
                         out["energy"][j].detach().cpu().item()
+                    )
+                    config_copy.property_weights["energy"] = (
+                        original_energy_weight if original_energy_weight > 0.0 else 1.0
                     )
                 if "forces" in out and out["forces"] is not None:
                     # Forces are per atom
@@ -295,10 +347,17 @@ def generate_pseudolabels_for_configs(
                     config_copy.properties["forces"] = (
                         out["forces"][node_start:node_end].detach().cpu().numpy()
                     )
-                if "stress" in out and out["stress"] is not None:
-                    config_copy.properties["stress"] = (
-                        out["stress"][j].detach().cpu().numpy()
+                    config_copy.property_weights["forces"] = (
+                        original_forces_weight if original_forces_weight > 0.0 else 1.0
                     )
+                if "stress" in out and out["stress"] is not None:
+                    if had_stress or force_stress:
+                        config_copy.properties["stress"] = (
+                            out["stress"][j].detach().cpu().numpy()
+                        )
+                        config_copy.property_weights["stress"] = (
+                            original_stress_weight if had_stress else 1.0
+                        )
                 if "virials" in out and out["virials"] is not None:
                     config_copy.properties["virials"] = (
                         out["virials"][j].detach().cpu().numpy()
@@ -319,6 +378,10 @@ def generate_pseudolabels_for_configs(
                     config_copy.properties["polarization"] = (
                         out["polarization"][j].detach().cpu().numpy()
                     )
+                    if compute_polarization:
+                        config_copy.property_weights["polarization"] = (
+                            config.property_weights.get("polarization", 0.0) or 1.0
+                        )
                 if "becs" in out and out["becs"] is not None:
                     # BECs are per atom
                     node_start = batch.ptr[j].item()
@@ -327,10 +390,18 @@ def generate_pseudolabels_for_configs(
                     config_copy.properties["becs"] = (
                         out["becs"][node_start:node_end].detach().cpu().numpy()
                     )
+                    if compute_becs:
+                        config_copy.property_weights["becs"] = (
+                            config.property_weights.get("becs", 0.0) or 1.0
+                        )
                 if "polarizability" in out and out["polarizability"] is not None:
                     config_copy.properties["polarizability"] = (
                         out["polarizability"][j].detach().cpu().numpy()
                     )
+                    if compute_polarizability:
+                        config_copy.property_weights["polarizability"] = (
+                            config.property_weights.get("polarizability", 0.0) or 1.0
+                        )
                 updated_configs.append(config_copy)
 
         except Exception as e:  # pylint: disable=broad-except
@@ -354,6 +425,10 @@ def apply_pseudolabels_to_pt_head_configs(
     r_max: float,
     device: torch.device,
     batch_size: int,
+    force_stress: bool = False,
+    compute_polarization: bool = False,
+    compute_becs: bool = False,
+    compute_polarizability: bool = False,
 ) -> bool:
     """
     Apply pseudolabels to pt_head configurations using the foundation model.
@@ -375,6 +450,17 @@ def apply_pseudolabels_to_pt_head_configs(
         )
 
         foundation_model.to(device)
+
+        if (
+            compute_polarization or compute_becs or compute_polarizability
+        ) and not is_macefield_model(foundation_model):
+            logging.warning(
+                "The replay foundation model is not MACEField; keeping replay "
+                "pseudolabels to energy, forces, and requested stress only."
+            )
+            compute_polarization = False
+            compute_becs = False
+            compute_polarizability = False
 
         # Use foundation model's z_table if available
         if hasattr(foundation_model, "atomic_numbers"):
@@ -406,6 +492,10 @@ def apply_pseudolabels_to_pt_head_configs(
                 r_max=r_max,
                 device=device,
                 batch_size=batch_size,
+                force_stress=force_stress,
+                compute_polarization=compute_polarization,
+                compute_becs=compute_becs,
+                compute_polarizability=compute_polarizability,
             )
 
             # Replace the original configurations with updated ones
@@ -429,6 +519,10 @@ def apply_pseudolabels_to_pt_head_configs(
                 r_max=r_max,
                 device=device,
                 batch_size=batch_size,
+                force_stress=force_stress,
+                compute_polarization=compute_polarization,
+                compute_becs=compute_becs,
+                compute_polarizability=compute_polarizability,
             )
 
             # Replace the original configurations with updated ones
@@ -442,3 +536,43 @@ def apply_pseudolabels_to_pt_head_configs(
     except Exception as e:  # pylint: disable=broad-except
         logging.error(f"Error applying pseudolabels: {str(e)}")
         return False
+
+
+def inherit_magnetic_hyperparameters_from_foundation(
+    args: argparse.Namespace, model_foundation: torch.nn.Module
+) -> Dict[str, Any]:
+    r"""Copy magnetic basis hyperparameters from the foundation checkpoint onto args."""
+    foundation_config = extract_config_mace_model(model_foundation)
+    inherited_magnetic_args: Dict[str, Any] = {}
+
+    foundation_m_max = foundation_config.get("m_max")
+    if foundation_m_max is not None:
+        if torch.is_tensor(foundation_m_max):
+            foundation_m_max = foundation_m_max.detach().cpu().tolist()
+        elif hasattr(foundation_m_max, "tolist"):
+            foundation_m_max = foundation_m_max.tolist()
+        args.m_max = foundation_m_max
+        inherited_magnetic_args["m_max_len"] = len(foundation_m_max)
+
+    foundation_max_m_ell = foundation_config.get("max_m_ell")
+    if foundation_max_m_ell is not None:
+        args.max_m_ell = int(foundation_max_m_ell)
+        inherited_magnetic_args["max_m_ell"] = args.max_m_ell
+
+    foundation_num_mag_radial_basis = foundation_config.get("num_mag_radial_basis")
+    if foundation_num_mag_radial_basis is not None:
+        args.num_mag_radial_basis = int(foundation_num_mag_radial_basis)
+        inherited_magnetic_args["num_mag_radial_basis"] = args.num_mag_radial_basis
+
+    foundation_num_mag_radial_basis_one_body = foundation_config.get(
+        "num_mag_radial_basis_one_body"
+    )
+    if foundation_num_mag_radial_basis_one_body is not None:
+        args.num_mag_radial_basis_one_body = int(
+            foundation_num_mag_radial_basis_one_body
+        )
+        inherited_magnetic_args["num_mag_radial_basis_one_body"] = (
+            args.num_mag_radial_basis_one_body
+        )
+
+    return inherited_magnetic_args

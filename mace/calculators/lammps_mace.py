@@ -3,6 +3,7 @@ from typing import Dict, List, Optional
 import torch
 from e3nn.util.jit import compile_mode
 
+from mace.modules.extensions import is_macefield_model
 from mace.tools.scatter import scatter_sum
 
 
@@ -14,6 +15,16 @@ class LAMMPS_MACE(torch.nn.Module):
         self.register_buffer("atomic_numbers", model.atomic_numbers)
         self.register_buffer("r_max", model.r_max)
         self.register_buffer("num_interactions", model.num_interactions)
+        configured_field = kwargs.get("electric_field", None)
+        self.electric_field_is_set: bool = configured_field is not None
+        if configured_field is None:
+            configured_field = (0.0, 0.0, 0.0)
+        electric_field = torch.as_tensor(
+            configured_field, dtype=model.r_max.dtype
+        ).view(-1, 3)
+        if electric_field.shape[0] != 1:
+            raise ValueError("electric_field must be a single 3-vector")
+        self.register_buffer("electric_field", electric_field)
 
         if not hasattr(model, "heads"):
             model.heads = [None]
@@ -26,9 +37,7 @@ class LAMMPS_MACE(torch.nn.Module):
         )
 
         # Best-effort detection of MACEField-like models (constant folded into TorchScript)
-        self.is_macefield: bool = bool(
-            hasattr(model, "field_feats") or hasattr(model, "field_linear")
-        )
+        self.is_macefield: bool = is_macefield_model(model)
 
         for param in self.model.parameters():
             param.requires_grad = False
@@ -53,7 +62,9 @@ class LAMMPS_MACE(torch.nn.Module):
         if self.is_macefield:
             # Always supply a field to MACEField (it affects energies/forces even if you don't output P/BEC/alpha)
             if electric_field is None:
-                if "electric_field" in data:
+                if self.electric_field_is_set:
+                    ef = self.electric_field
+                elif "electric_field" in data:
                     ef = data["electric_field"]
                 else:
                     # fallback: zero field

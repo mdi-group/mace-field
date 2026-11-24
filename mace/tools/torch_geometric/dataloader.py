@@ -78,10 +78,22 @@ class DataLoader(torch.utils.data.DataLoader):
         self.follow_batch = follow_batch
         self.exclude_keys = exclude_keys
 
-        super().__init__(
-            dataset,
-            batch_size,
-            shuffle,
-            collate_fn=Collater(follow_batch, exclude_keys),
-            **kwargs,
-        )
+        collate_fn = Collater(follow_batch, exclude_keys)
+        if "batch_sampler" in kwargs:
+            # PyTorch requires batch_sampler to be mutually exclusive with
+            # batch_size, shuffle, sampler, and drop_last.  Keeping this
+            # branch here lets MACE use atom-budgeted batches without
+            # changing the normal DataLoader API.
+            super().__init__(
+                dataset,
+                collate_fn=collate_fn,
+                **kwargs,
+            )
+        else:
+            super().__init__(
+                dataset,
+                batch_size,
+                shuffle,
+                collate_fn=collate_fn,
+                **kwargs,
+            )
