@@ -1,13 +1,12 @@
 # Quick Start
 
-This page takes you from a source checkout to a first MACE-Field training
-command. It assumes an ASE-readable extended XYZ dataset with reference energy
-and force labels. See [Data](guide/data.md) for the optional field-response
-labels.
+This page takes you from installing MACE-Field to a first training command. It
+assumes an ASE-readable extended XYZ dataset with reference energy and force
+labels. See [Data](guide/data.md) for the optional field-response labels.
 
 ## Install
 
-Install MACE-Field from source using the steps in the
+Install the PyPI package using the
 [installation guide](guide/installation.md), including the PyTorch build for
 your hardware. Return here for the first training and inference examples.
 
@@ -65,8 +64,11 @@ polarization = atoms.calc.results["polarization"]
 Continue with the [ASE calculator guide](guide/ase-calculator.md), or use the
 [tutorial notebooks](examples/index.md) for a worked BaTiO₃ workflow.
 
-## Try the released MH-0 checkpoint
+## Try the MH-0 checkpoint
 
+The MH-0 checkpoint is the earlier MACE-Field foundation release. The current
+MH-1 model and its training-data provenance are listed in the
+[foundation-model table in the README](https://github.com/mdi-group/mace-field#mace-field-foundation-models).
 The [1.0.2 release](https://github.com/mdi-group/mace-field/releases/tag/1.0.2)
 includes the multi-head checkpoint
 [`MACEField-MH-0-omat-dielectric.model`](https://github.com/mdi-group/mace-field/releases/download/1.0.2/MACEField-MH-0-omat-dielectric.model).

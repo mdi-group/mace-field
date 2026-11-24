@@ -9,6 +9,11 @@ This guide covers MACE-Field-specific workflows. For general MACE installation,
 training options, acceleration backends, and foundation-model details, see the
 `MACE documentation <https://mace-docs.readthedocs.io/>`_.
 
+Install the current release from PyPI with
+``python -m pip install mace-field-torch``. MACE-Field foundation checkpoints
+are distributed separately as release assets; the project README lists the
+released models, their base heads, and fine-tuning datasets.
+
 Start with :doc:`quick-start`, then use the guide pages for data preparation,
 training, fine-tuning, evaluation, and deployment. The examples page links to
 the Colab-ready tutorials.

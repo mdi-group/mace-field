@@ -5,8 +5,15 @@ multi-head checkpoint, select the pretrained head that matches the target data
 domain. Consult the release notes for the checkpoint's supported elements,
 reference method, and license before training.
 
-The following example fine-tunes the `omat_pbe` head from MACE-MH-1 into a
-single-head MACE-Field model:
+The released MACE-Field foundation checkpoints and their fine-tuning data are
+listed in the
+[project README](https://github.com/mdi-group/mace-field#mace-field-foundation-models).
+The current MH-1 model is available from the
+[1.1.0 release](https://github.com/mdi-group/mace-field/releases/tag/1.1.0).
+
+The following example starts from the upstream MACE-MH-1 `omat_pbe` head and
+fine-tunes it into a single-head MACE-Field model. It does not start from the
+released MACEField-MH-1 checkpoint:
 
 ```bash
 mace_run_train \
@@ -44,7 +51,7 @@ See the MACE documentation on [fine-tuning foundation models](https://mace-docs.
 and [multi-head replay](https://mace-docs.readthedocs.io/en/latest/guide/multihead_finetuning.html)
 for general guidance.
 
-## Fine-tuning a MACE-Field foundation checkpoint
+## Fine-tuning from the MH-0 checkpoint
 
 A MACE-Field checkpoint can initialize another MACE-Field model. This transfers
 compatible backbone, energy-readout, and field-coupling parameters from the
