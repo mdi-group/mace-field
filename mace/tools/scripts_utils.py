@@ -808,9 +808,7 @@ def compute_polarizability_scales(
         head_name = head_config.head_name
         if head_name not in values_by_head:
             continue
-        train_configs = getattr(
-            getattr(head_config, "collections", None), "train", []
-        )
+        train_configs = getattr(getattr(head_config, "collections", None), "train", [])
         for config in train_configs:
             value = config.properties.get("polarizability")
             weight = config.property_weights.get("polarizability", 0.0)
@@ -947,9 +945,7 @@ def get_loss_fn(
             polarizability_loss_mode=getattr(
                 args, "polarizability_loss_mode", "standardized_symmetric_huber"
             ),
-            polarizability_huber_delta=getattr(
-                args, "polarizability_huber_delta", 1.0
-            ),
+            polarizability_huber_delta=getattr(args, "polarizability_huber_delta", 1.0),
             polarizability_scales=polarizability_scales,
         )
     else:
@@ -1040,9 +1036,7 @@ def get_swa(
             polarizability_loss_mode=getattr(
                 args, "polarizability_loss_mode", "standardized_symmetric_huber"
             ),
-            polarizability_huber_delta=getattr(
-                args, "polarizability_huber_delta", 1.0
-            ),
+            polarizability_huber_delta=getattr(args, "polarizability_huber_delta", 1.0),
             polarizability_scales=polarizability_scales,
         )
     else:
@@ -1201,9 +1195,7 @@ def get_params_options(
                 "name": submodule_name,
                 "params": submodule_parameters,
                 "weight_decay": (
-                    field_weight_decay
-                    if is_field_model and is_field_component
-                    else 0.0
+                    field_weight_decay if is_field_model and is_field_component else 0.0
                 ),
             }
         )

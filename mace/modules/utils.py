@@ -899,9 +899,7 @@ def _get_becs_from_force_field_loop(
     becs_list: List[torch.Tensor] = []
     for d in range(3):
         field_component = field_gradient[:, d]
-        grad_outputs: List[Optional[torch.Tensor]] = [
-            torch.ones_like(field_component)
-        ]
+        grad_outputs: List[Optional[torch.Tensor]] = [torch.ones_like(field_component)]
         gradient = torch.autograd.grad(
             outputs=[field_component],
             inputs=[positions],
@@ -1231,9 +1229,7 @@ def _get_polarizability_loop(
     polarizability_list: List[torch.Tensor] = []
     for d in range(3):
         polar_component = polarization[:, d]
-        grad_outputs: List[Optional[torch.Tensor]] = [
-            torch.ones_like(polar_component)
-        ]
+        grad_outputs: List[Optional[torch.Tensor]] = [torch.ones_like(polar_component)]
         grad_field = torch.autograd.grad(
             outputs=[polar_component],
             inputs=[electric_field],

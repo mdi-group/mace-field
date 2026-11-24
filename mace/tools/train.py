@@ -71,18 +71,19 @@ def _model_output_kwargs(batch, output_args: Dict[str, bool], training: bool):
     if output_args.get("magforces", False):
         kwargs["compute_magforces"] = True
 
-    polarization = output_args.get("polarization", False) and _has_active_property_weight(
-        batch, "polarization"
-    )
+    polarization = output_args.get(
+        "polarization", False
+    ) and _has_active_property_weight(batch, "polarization")
     becs = output_args.get("becs", False) and _has_active_property_weight(batch, "becs")
-    polarizability = output_args.get("polarizability", False) and _has_active_property_weight(
-        batch, "polarizability"
-    )
+    polarizability = output_args.get(
+        "polarizability", False
+    ) and _has_active_property_weight(batch, "polarizability")
     # BECs and polarizabilities are derived from polarization, so they imply
     # the first response even when no standalone polarization label is present.
-    kwargs["compute_polarization"] = polarization or becs or polarizability
-    kwargs["compute_becs"] = becs
-    kwargs["compute_polarizability"] = polarizability
+    if polarization or becs or polarizability:
+        kwargs["compute_polarization"] = polarization or becs or polarizability
+        kwargs["compute_becs"] = becs
+        kwargs["compute_polarizability"] = polarizability
     return kwargs
 
 
@@ -100,9 +101,9 @@ def polarizability_log_eigenvalue_error(
     prediction = prediction.view(-1, 3, 3)
     reference = 0.5 * (reference + reference.transpose(-1, -2))
     prediction = 0.5 * (prediction + prediction.transpose(-1, -2))
-    identity = torch.eye(
-        3, device=reference.device, dtype=reference.dtype
-    ).expand(reference.shape[0], -1, -1)
+    identity = torch.eye(3, device=reference.device, dtype=reference.dtype).expand(
+        reference.shape[0], -1, -1
+    )
     reference_eigenvalues = torch.linalg.eigvalsh(identity + reference).clamp_min(
         1.0e-8
     )
@@ -489,23 +490,23 @@ def train_one_epoch(
         opt_metrics["epoch"] = epoch
         if rank == 0:
             logger.log(opt_metrics)
-        return False
-    else:
-        for update_idx, batch in enumerate(data_loader):
-            _, opt_metrics = take_step(
-                model=model_to_train,
-                loss_fn=loss_fn,
-                batch=batch,
-                optimizer=optimizer,
-                ema=ema,
-                output_args=output_args,
-                max_grad_norm=max_grad_norm,
-                device=device,
-            )
-            opt_metrics["mode"] = "opt"
-            opt_metrics["epoch"] = epoch
-            if rank == 0:
-                logger.log(opt_metrics)
+        return
+
+    for batch in data_loader:
+        _, opt_metrics = take_step(
+            model=model_to_train,
+            loss_fn=loss_fn,
+            batch=batch,
+            optimizer=optimizer,
+            ema=ema,
+            output_args=output_args,
+            max_grad_norm=max_grad_norm,
+            device=device,
+        )
+        opt_metrics["mode"] = "opt"
+        opt_metrics["epoch"] = epoch
+        if rank == 0:
+            logger.log(opt_metrics)
 
 
 def take_step(

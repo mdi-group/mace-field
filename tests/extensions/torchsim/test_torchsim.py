@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import torch
+from e3nn import o3
 
 from mace.modules import MACEField, interaction_classes
 from mace.tools.torch_tools import default_dtype
@@ -49,8 +50,8 @@ MACEFIELD_CONFIG = dict(
     ],
     num_interactions=2,
     num_elements=2,
-    hidden_irreps="8x0e + 8x1o",
-    MLP_irreps="4x0e",
+    hidden_irreps=o3.Irreps("8x0e + 8x1o"),
+    MLP_irreps=o3.Irreps("4x0e"),
     gate=torch.nn.functional.silu,
     atomic_energies=np.zeros(2),
     avg_num_neighbors=8,

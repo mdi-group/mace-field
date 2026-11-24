@@ -403,8 +403,10 @@ class MACEField(ScaleShiftMACE):
             and response_requested
             and (compute_force or compute_virials or compute_stress)
             and (
-                (compute_virials or compute_stress) and displacement is not None
-                or compute_force and not (compute_virials or compute_stress)
+                (compute_virials or compute_stress)
+                and displacement is not None
+                or compute_force
+                and not (compute_virials or compute_stress)
             )
             and (
                 response_graph_mask is None
@@ -476,9 +478,7 @@ class MACEField(ScaleShiftMACE):
                         create_graph=training,
                         graph_mask=common_response_mask,
                     )
-                    polarizability = (
-                        polarizability / volume.view(-1, 1, 1) / eps0
-                    )
+                    polarizability = polarizability / volume.view(-1, 1, 1) / eps0
                 else:
                     # Maxwell-equivalent force-field route:
                     # BEC = dF/dE = -d/dR (dE/dE).  This reverse-mode ordering

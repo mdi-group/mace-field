@@ -4,7 +4,6 @@ import torch
 
 from mace.tools.utils import AtomicNumberTable
 
-
 _MACE_FOUNDATION_CLASSES = {
     "MACE",
     "ScaleShiftMACE",
@@ -247,6 +246,8 @@ def load_foundations_elements_default(
         module: torch.nn.Module, name: str, value: torch.Tensor
     ) -> None:
         target = getattr(module, name)
+        if target.shape != value.shape:
+            return
         setattr(module, name, torch.nn.Parameter(value.clone()))
 
     z_table = AtomicNumberTable([int(z) for z in model_foundations.atomic_numbers])
@@ -305,9 +306,7 @@ def load_foundations_elements_default(
             if param_1.shape == param_2.shape:
                 param_1.data.copy_(param_2.data)
             else:
-                param_1.data.copy_(
-                    param_2.data[: (num_radial + 2 * num_species), ...]
-                )
+                param_1.data.copy_(param_2.data[: (num_radial + 2 * num_species), ...])
         if hasattr(model.interactions[i], "linear"):
             assign_parameter_if_compatible(
                 model.interactions[i].linear,
@@ -618,7 +617,9 @@ def load_foundations_elements_default(
             # be restored for pt_head, while the real field heads retain
             # their dataset-specific residual shifts.
             pt_head_index = model_heads.index("pt_head")
-            foundation_shift = model_foundations.scale_shift.shift.reshape(-1)[0].clone()
+            foundation_shift = model_foundations.scale_shift.shift.reshape(-1)[
+                0
+            ].clone()
             if model.scale_shift.shift.numel() == 1:
                 model.scale_shift.shift = foundation_shift
             else:
@@ -633,8 +634,7 @@ def load_foundations_elements_default(
         if name not in model_state:
             continue
         if field_target and (
-            name == "scale_shift.shift"
-            or name.startswith("atomic_energies_fn.")
+            name == "scale_shift.shift" or name.startswith("atomic_energies_fn.")
         ):
             continue
         if not load_readout and name.startswith("readouts."):
@@ -650,9 +650,7 @@ def load_foundations_elements_default(
     return model
 
 
-def _initialize_field_modules(
-    model: torch.nn.Module, scale: float = 1.0e-3
-) -> None:
+def _initialize_field_modules(model: torch.nn.Module, scale: float = 1.0e-3) -> None:
     """Keep newly added field-response modules quiet but trainable.
 
     A plain MACE foundation has no parameters corresponding to the legacy

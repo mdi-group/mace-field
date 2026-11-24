@@ -203,6 +203,13 @@ def run(args: argparse.Namespace) -> None:
         args.return_magforces = False
     if not hasattr(args, "compute_bec"):
         args.compute_bec = False
+    for response_flag in (
+        "compute_polarization",
+        "compute_becs",
+        "compute_polarizability",
+    ):
+        if not hasattr(args, response_flag):
+            setattr(args, response_flag, False)
     torch_tools.set_default_dtype(args.default_dtype)
     device = torch_tools.init_device(args.device)
 

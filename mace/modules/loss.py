@@ -809,9 +809,7 @@ class UniversalFieldLoss(torch.nn.Module):
             torch.tensor(polarizability_weight, dtype=torch.get_default_dtype()),
         )
         if polarizability_scales is None:
-            polarizability_scales = torch.ones(
-                (1, 6), dtype=torch.get_default_dtype()
-            )
+            polarizability_scales = torch.ones((1, 6), dtype=torch.get_default_dtype())
         else:
             polarizability_scales = torch.as_tensor(
                 polarizability_scales, dtype=torch.get_default_dtype()
@@ -900,7 +898,7 @@ class UniversalFieldLoss(torch.nn.Module):
             has_active_ref = ref_weight is not None and bool(
                 torch.any(ref_weight != 0).item()
             )
-            has_ref = (has_active_ref and (hasattr(ref, name) or (name in ref)))
+            has_ref = has_active_ref and (hasattr(ref, name) or (name in ref))
             has_pred = name in pred
 
             if float(weight_buf) == 0.0 or not has_active_ref:
@@ -1021,9 +1019,7 @@ class UniversalFieldLoss(torch.nn.Module):
                 loss_becs = torch.tensor(0.0, device=configs_energy_weight.device)
 
             if use_polarizability:
-                loss_polarizability = self._compute_polarizability_loss(
-                    ref, pred, ddp
-                )
+                loss_polarizability = self._compute_polarizability_loss(ref, pred, ddp)
             else:
                 loss_polarizability = torch.tensor(
                     0.0, device=configs_energy_weight.device
@@ -1082,9 +1078,7 @@ class UniversalFieldLoss(torch.nn.Module):
                 loss_becs = torch.tensor(0.0, device=configs_energy_weight.device)
 
             if use_polarizability:
-                loss_polarizability = self._compute_polarizability_loss(
-                    ref, pred, ddp
-                )
+                loss_polarizability = self._compute_polarizability_loss(ref, pred, ddp)
             else:
                 loss_polarizability = torch.tensor(
                     0.0, device=configs_energy_weight.device
