@@ -60,8 +60,13 @@ def _has_active_property_weight(batch, name: str) -> bool:
     return weights is not None and bool(torch.any(weights != 0).item())
 
 
-def _model_output_kwargs(batch, output_args: Dict[str, bool], training: bool):
-    """Build model output flags, computing field responses only when labelled."""
+def _model_output_kwargs(
+    model: torch.nn.Module,
+    batch,
+    output_args: Dict[str, bool],
+    training: bool,
+):
+    """Build output flags, enabling MACE-Field responses only when labelled."""
     kwargs = dict(
         training=training,
         compute_force=output_args["forces"],
@@ -70,6 +75,11 @@ def _model_output_kwargs(batch, output_args: Dict[str, bool], training: bool):
     )
     if output_args.get("magforces", False):
         kwargs["compute_magforces"] = True
+
+    while hasattr(model, "module"):
+        model = model.module
+    if model.__class__.__name__ != "MACEField":
+        return kwargs
 
     polarization = output_args.get(
         "polarization", False
@@ -525,7 +535,7 @@ def take_step(
 
     def closure():
         optimizer.zero_grad(set_to_none=True)
-        kwargs = _model_output_kwargs(batch, output_args, training=True)
+        kwargs = _model_output_kwargs(model, batch, output_args, training=True)
         output = model(batch_dict, **kwargs)
         loss = loss_fn(pred=output, ref=batch)
         loss.backward()
@@ -594,7 +604,7 @@ def take_step_lbfgs(
         for batch in data_loader:
             batch = batch.to(device)
             batch_dict = batch.to_dict()
-            kwargs = _model_output_kwargs(batch, output_args, training=True)
+            kwargs = _model_output_kwargs(model, batch, output_args, training=True)
             output = model(batch_dict, **kwargs)
             batch_loss = loss_fn(pred=output, ref=batch)
             batch_loss = batch_loss * (batch.num_graphs / total_sample_count)
@@ -671,7 +681,7 @@ def evaluate(
         for batch in data_loader:
             batch = batch.to(device)
             batch_dict = batch.to_dict()
-            kwargs = _model_output_kwargs(batch, output_args, training=False)
+            kwargs = _model_output_kwargs(model, batch, output_args, training=False)
             output = model(batch_dict, **kwargs)
             avg_loss, aux = metrics(batch, output)
     avg_loss, aux = metrics.compute()
