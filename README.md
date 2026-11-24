@@ -20,34 +20,13 @@ MACE foundation models, ASE inference, and batch evaluation.
 
 ## What MACE-Field provides
 
-For the energy functional
+For the energy functional $E(\mathbf{R}, \mathbf{\mathcal{E}}),$ the model can return:
 
-$$
-E(\mathbf{R}, \mathbf{\mathcal{E}}),
-$$
+**Polarization:**  $\mathbf{P} = -\frac{1}{\Omega} \frac{\partial E}{\partial \mathbf{\mathcal{E}}}$
 
-the model can return:
+**Born effective charges:**  $Z^\star_{\kappa,\alpha\beta} = \frac{\partial P_\alpha}{\partial R_{\kappa,\beta}}$
 
-**Polarization**
-
-$$
-\mathbf{P} = -\frac{1}{\Omega}
-\frac{\partial E}{\partial \mathbf{\mathcal{E}}}
-$$
-
-**Born effective charges**
-
-$$
-Z^*_{\kappa,\alpha\beta} =
-\frac{\partial P_\alpha}{\partial R_{\kappa,\beta}}
-$$
-
-**Polarizability or susceptibility**
-
-$$
-\chi_{\alpha\beta} =
-\frac{\partial P_\alpha}{\partial \mathcal{E}_\beta}
-$$
+**Polarizability or susceptibility:**   $\chi_{\alpha\beta} = \frac{\partial P_\alpha}{\partial \mathcal{E}_\beta}$
 
 The response quantities are derivatives of one scalar model output, so the
 energy, forces, and field response remain mutually consistent. At zero field,
