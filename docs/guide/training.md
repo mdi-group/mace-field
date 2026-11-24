@@ -47,10 +47,11 @@ path from data that do not sample one.
 ## Pseudolabel replay
 
 The `--pseudolabel_replay` option can generate energy and force labels from a
-foundation model and can include stress/virial labels according to the replay
-options. Field-response pseudolabels require a MACE-Field source model; a plain
-MACE foundation model has no field-response head and cannot provide
-polarization, BEC, or polarizability labels. When replaying from a field model,
+pretrained model and can include stress/virial labels according to the replay
+options. An upstream MACE pretrained model such as `mace-mh-1.model` supplies
+these mechanical labels. Response pseudolabels require a MACEField source
+checkpoint, such as `MACEField-MH-1.model` or
+`MACEField-MH-0-omat-dielectric.model`. When replaying from a MACEField model,
 request the needed response outputs with the corresponding `--compute_*`
 options.
 

@@ -20,8 +20,9 @@ response properties from derivatives of that same scalar:
   It is dimensionless and is reported in $\epsilon_0$ units.
 
 This shared energy makes the energy, forces, and field responses consistent
-with one another. At zero field, the field coupling contributes zero, which
-allows the MACE backbone to be initialized from a compatible foundation model.
+with one another. At zero field, the explicit field contribution to energy is
+zero, allowing compatible parameters from an upstream MACE pretrained model
+(for example, `mace-mh-1.model`) to initialize a MACEField model.
 
 ## Units and conventions
 

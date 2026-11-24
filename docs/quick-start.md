@@ -64,11 +64,13 @@ polarization = atoms.calc.results["polarization"]
 Continue with the [ASE calculator guide](guide/ase-calculator.md), or use the
 [tutorial notebooks](examples/index.md) for a worked BaTiO₃ workflow.
 
-## Try the MH-0 checkpoint
+## Try the MACEField-MH-0 checkpoint
 
-The MH-0 checkpoint is the earlier MACE-Field foundation release. The current
-MH-1 model and its training-data provenance are listed in the
-[foundation-model table in the README](https://github.com/mdi-group/mace-field#mace-field-foundation-models).
+This example uses the earlier MACEField checkpoint
+`MACEField-MH-0-omat-dielectric.model`. The current checkpoint,
+`MACEField-MH-1.model`, and the training-data provenance for both models are
+listed in the
+[foundation-model table in the README](https://github.com/mdi-group/mace-field#macefield-pretrained-foundation-models).
 The [1.0.2 release](https://github.com/mdi-group/mace-field/releases/tag/1.0.2)
 includes the multi-head checkpoint
 [`MACEField-MH-0-omat-dielectric.model`](https://github.com/mdi-group/mace-field/releases/download/1.0.2/MACEField-MH-0-omat-dielectric.model).
