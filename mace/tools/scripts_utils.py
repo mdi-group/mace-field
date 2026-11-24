@@ -794,6 +794,7 @@ def compute_polarizability_scales(
     heads: List[str],
     core_max_norm: float = 1000.0,
     floor: float = 1.0e-6,
+    train_datasets_by_head=None,
 ) -> np.ndarray:
     """Estimate robust six-component polarizability scales from train cores.
 
@@ -804,34 +805,94 @@ def compute_polarizability_scales(
     unit scales because their loss term is inactive.
     """
     values_by_head = {head: [] for head in heads}
+
+    def as_numpy(value):
+        if torch.is_tensor(value):
+            return value.detach().cpu().numpy()
+        return np.asarray(value)
+
+    def iter_dataset_property(dataset, property_name):
+        if isinstance(dataset, data.HDF5Dataset):
+            yield from dataset.iter_property_with_weight(property_name)
+        elif isinstance(dataset, torch.utils.data.ConcatDataset):
+            for child_dataset in dataset.datasets:
+                yield from iter_dataset_property(child_dataset, property_name)
+        elif isinstance(dataset, (list, tuple)):
+            for item in dataset:
+                if hasattr(item, "properties"):
+                    yield (
+                        item.properties.get(property_name),
+                        item.property_weights.get(property_name, 0.0),
+                    )
+                else:
+                    yield (
+                        getattr(item, property_name, None),
+                        getattr(item, f"{property_name}_weight", None),
+                    )
+        elif dataset is not None and hasattr(dataset, "__len__") and hasattr(
+            dataset, "__getitem__"
+        ):
+            # Non-HDF5 datasets have no raw-property iterator, so inspect their
+            # items as a correctness-preserving fallback.
+            for index in range(len(dataset)):
+                item = dataset[index]
+                if hasattr(item, "properties"):
+                    yield (
+                        item.properties.get(property_name),
+                        item.property_weights.get(property_name, 0.0),
+                    )
+                else:
+                    yield (
+                        getattr(item, property_name, None),
+                        getattr(item, f"{property_name}_weight", None),
+                    )
+
+    def add_label(head_name, value, weight):
+        if value is None or weight is None or not np.any(as_numpy(weight) != 0):
+            return
+        matrix = np.asarray(as_numpy(value), dtype=float).reshape(3, 3)
+        if not np.isfinite(matrix).all():
+            return
+        matrix = 0.5 * (matrix + matrix.T)
+        if np.linalg.norm(matrix) > core_max_norm:
+            return
+        values_by_head[head_name].append(
+            np.array(
+                [
+                    matrix[0, 0],
+                    matrix[1, 1],
+                    matrix[2, 2],
+                    np.sqrt(2.0) * matrix[0, 1],
+                    np.sqrt(2.0) * matrix[0, 2],
+                    np.sqrt(2.0) * matrix[1, 2],
+                ]
+            )
+        )
+
     for head_config in head_configs:
         head_name = head_config.head_name
         if head_name not in values_by_head:
             continue
-        train_configs = getattr(getattr(head_config, "collections", None), "train", [])
-        for config in train_configs:
-            value = config.properties.get("polarizability")
-            weight = config.property_weights.get("polarizability", 0.0)
-            if value is None or not np.any(np.asarray(weight) != 0):
-                continue
-            matrix = np.asarray(value, dtype=float).reshape(3, 3)
-            if not np.isfinite(matrix).all():
-                continue
-            matrix = 0.5 * (matrix + matrix.T)
-            if np.linalg.norm(matrix) > core_max_norm:
-                continue
-            values_by_head[head_name].append(
-                np.array(
-                    [
-                        matrix[0, 0],
-                        matrix[1, 1],
-                        matrix[2, 2],
-                        np.sqrt(2.0) * matrix[0, 1],
-                        np.sqrt(2.0) * matrix[0, 2],
-                        np.sqrt(2.0) * matrix[1, 2],
-                    ]
+        train_configs = getattr(
+            getattr(head_config, "collections", None), "train", []
+        )
+        if train_configs:
+            for config in train_configs:
+                add_label(
+                    head_name,
+                    config.properties.get("polarizability"),
+                    config.property_weights.get("polarizability", 0.0),
                 )
-            )
+            continue
+
+        # HDF5-backed heads do not populate HeadConfig.collections. Read their
+        # already-loaded training dataset directly so their labels receive the
+        # same robust per-head scaling as ASE-backed heads.
+        train_dataset = (train_datasets_by_head or {}).get(head_name)
+        for value, weight in iter_dataset_property(
+            train_dataset, "polarizability"
+        ):
+            add_label(head_name, value, weight)
 
     scales = np.ones((len(heads), 6), dtype=float)
     for head_index, head_name in enumerate(heads):
@@ -871,6 +932,23 @@ def get_loss_fn(
     compute_dipole: bool,
     polarizability_scales: Optional[np.ndarray] = None,
 ) -> torch.nn.Module:
+    hessian_supervision = (
+        getattr(args, "hessian_weight", 0.0) != 0.0
+        or (
+            getattr(args, "swa", False)
+            and getattr(args, "swa_hessian_weight", 0.0) != 0.0
+        )
+    )
+    if hessian_supervision and getattr(args, "model", None) not in (
+        "MACEField",
+        "FoundationMACEField",
+    ):
+        raise ValueError("Hessian supervision is currently supported for MACEField models.")
+    if hessian_supervision and args.loss not in ("universal_field", "UniversalField"):
+        raise ValueError(
+            "Hessian supervision is supported by the universal_field loss; "
+            "set --loss=universal_field when using a non-zero Hessian weight."
+        )
     if args.loss == "weighted":
         loss_fn = modules.WeightedEnergyForcesLoss(
             energy_weight=args.energy_weight, forces_weight=args.forces_weight
@@ -947,6 +1025,7 @@ def get_loss_fn(
             ),
             polarizability_huber_delta=getattr(args, "polarizability_huber_delta", 1.0),
             polarizability_scales=polarizability_scales,
+            hessian_weight=getattr(args, "hessian_weight", 0.0),
         )
     else:
         loss_fn = modules.WeightedEnergyForcesLoss(energy_weight=1.0, forces_weight=1.0)
@@ -1038,6 +1117,7 @@ def get_swa(
             ),
             polarizability_huber_delta=getattr(args, "polarizability_huber_delta", 1.0),
             polarizability_scales=polarizability_scales,
+            hessian_weight=getattr(args, "swa_hessian_weight", 0.0),
         )
     else:
         loss_fn_energy = modules.WeightedEnergyForcesLoss(
@@ -1249,7 +1329,8 @@ def get_optimizer(
             from schedulefree import adamw_schedulefree
         except ImportError as exc:
             raise ImportError(
-                "`schedulefree` is not installed. Please install it via `pip install schedulefree` or `pip install mace-torch[schedulefree]`"
+                "`schedulefree` is not installed. Install it with `pip install schedulefree` "
+                "or `pip install 'mace-field-torch[schedulefree]'`."
             ) from exc
         _param_options = {k: v for k, v in param_options.items() if k != "amsgrad"}
         _param_options.pop("betas", None)

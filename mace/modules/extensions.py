@@ -274,6 +274,9 @@ class MACEField(ScaleShiftMACE):
             # Keep the unmasked path so explicitly requested responses retain
             # their historical behavior outside the training loop.
             response_graph_mask = None
+            polarization_labels = None
+            becs_labels = None
+            polarizability_labels = None
 
         # Atomic energies
         node_e0 = self.atomic_energies_fn(data["node_attrs"])[
@@ -555,6 +558,7 @@ class MACEField(ScaleShiftMACE):
                 compute_virials=compute_virials,
                 compute_stress=compute_stress,
                 compute_hessian=compute_hessian,
+                hessian_probes=data.get("hessian_probes"),
                 compute_edge_forces=compute_edge_forces,
             )
         else:
@@ -770,6 +774,9 @@ class MACELES(ScaleShiftMACE):
         compute_atomic_stresses: bool = False,
         lammps_mliap: bool = False,
         compute_bec: bool = False,
+        compute_polarization: bool = False,  # pylint: disable=unused-argument
+        compute_becs: bool = False,  # pylint: disable=unused-argument
+        compute_polarizability: bool = False,  # pylint: disable=unused-argument
     ) -> Dict[str, Optional[torch.Tensor]]:
         ctx = prepare_graph(
             data,
@@ -1101,6 +1108,7 @@ class MACELES(ScaleShiftMACE):
             compute_virials=compute_virials,
             compute_stress=compute_stress,
             compute_hessian=compute_hessian,
+            hessian_probes=data.get("hessian_probes"),
             compute_edge_forces=compute_edge_forces,
         )
 
@@ -1779,6 +1787,7 @@ class PolarMACE(ScaleShiftMACE):
             compute_virials=compute_virials,
             compute_stress=compute_stress,
             compute_hessian=compute_hessian,
+            hessian_probes=data.get("hessian_probes"),
             compute_edge_forces=compute_edge_forces or compute_atomic_stresses,
         )
 
@@ -2232,6 +2241,9 @@ class MagneticScaleShiftMACE(MagneticMACE):
         compute_magforces: bool = True,
         compute_edge_forces: bool = False,
         compute_atomic_stresses: bool = False,
+        compute_polarization: bool = False,  # pylint: disable=unused-argument
+        compute_becs: bool = False,  # pylint: disable=unused-argument
+        compute_polarizability: bool = False,  # pylint: disable=unused-argument
     ) -> Dict[str, Optional[torch.Tensor]]:
         # Setup
         data["positions"].requires_grad_(True)
@@ -2411,6 +2423,7 @@ class MagneticScaleShiftMACE(MagneticMACE):
             compute_virials=compute_virials,
             compute_stress=compute_stress,
             compute_hessian=compute_hessian,
+            hessian_probes=data.get("hessian_probes"),
             compute_edge_forces=compute_edge_forces or compute_atomic_stresses,
             compute_magforces=compute_magforces,
         )

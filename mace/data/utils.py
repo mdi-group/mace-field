@@ -54,6 +54,7 @@ def update_keyspec_from_kwargs(
         "energy_key",
         "stress_key",
         "virials_key",
+        "hessian_key",
         "dipole_key",
         "head_key",
         "elec_temp_key",
@@ -299,12 +300,19 @@ def load_from_xyz(
     final_energy_key = key_specification.info_keys["energy"]
     final_forces_key = key_specification.arrays_keys["forces"]
     final_dipole_key = key_specification.info_keys.get("dipole", "REF_dipole")
+    final_hessian_key = key_specification.info_keys.get("hessian")
     has_energy = any(final_energy_key in atoms.info for atoms in atoms_list)
     has_forces = any(final_forces_key in atoms.arrays for atoms in atoms_list)
     has_dipole = any(final_dipole_key in atoms.info for atoms in atoms_list)
+    has_hessian = final_hessian_key is not None and any(
+        final_hessian_key in atoms.info for atoms in atoms_list
+    )
 
-    if not has_energy and not has_forces and not has_dipole:
-        msg = f"None of '{final_energy_key}', '{final_forces_key}', and '{final_dipole_key}' found in '{file_path}'."
+    if not has_energy and not has_forces and not has_dipole and not has_hessian:
+        msg = (
+            f"None of '{final_energy_key}', '{final_forces_key}', "
+            f"'{final_dipole_key}', or '{final_hessian_key}' found in '{file_path}'."
+        )
         if no_data_ok:
             logging.warning(msg + " Continuing because no_data_ok=True was passed in.")
         else:
@@ -593,6 +601,9 @@ def save_AtomicData_to_HDF5(data, i, h5_file) -> None:
     grp["virials_weight"] = data.virials_weight
     grp["forces"] = data.forces
     grp["energy"] = data.energy
+    if getattr(data, "hessian", None) is not None and data.hessian.numel() > 0:
+        grp["hessian"] = data.hessian
+        grp["hessian_weight"] = data.hessian_weight
     grp["stress"] = data.stress
     grp["virials"] = data.virials
     grp["dipole"] = data.dipole
@@ -624,6 +635,7 @@ def save_configurations_as_HDF5(configurations: Configurations, _, h5_file) -> N
         for key, value in config.property_weights.items():
             weights_subgrp[key] = write_value(value)
         subgroup["config_type"] = write_value(config.config_type)
+        subgroup["head"] = write_value(config.head)
 
 
 def write_value(value):

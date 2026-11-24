@@ -82,6 +82,15 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=False,
     )
     parser.add_argument(
+        "--ddp_find_unused_parameters",
+        help=(
+            "enable DDP unused-parameter discovery; useful for dynamic multi-head "
+            "or higher-order response graphs"
+        ),
+        type=str2bool,
+        default=False,
+    )
+    parser.add_argument(
         "--launcher",
         default="slurm",
         choices=["slurm", "torchrun", "mpi", "none"],
@@ -708,6 +717,15 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         default=DefaultKeys.FORCES.value,
     )
     parser.add_argument(
+        "--hessian_key",
+        help=(
+            "Key of reference energy Hessians (force derivatives) in training "
+            "xyz; store as a flat per-configuration array or a 3N x 3N matrix"
+        ),
+        type=str,
+        default=DefaultKeys.HESSIAN.value,
+    )
+    parser.add_argument(
         "--virials_key",
         help="Key of reference virials in training xyz",
         type=str,
@@ -845,6 +863,20 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         "--forces_weight", help="weight of forces loss", type=float, default=100.0
     )
     parser.add_argument(
+        "--hessian_weight",
+        help="weight of the MACEField energy-Hessian loss (eV/A^2 targets)",
+        type=float,
+        default=0.0,
+    )
+    parser.add_argument(
+        "--swa_hessian_weight",
+        "--stage_two_hessian_weight",
+        help="weight of the Hessian loss after starting Stage Two",
+        type=float,
+        default=0.0,
+        dest="swa_hessian_weight",
+    )
+    parser.add_argument(
         "--swa_forces_weight",
         "--stage_two_forces_weight",
         help="weight of forces loss after starting Stage Two (previously called swa)",
@@ -868,6 +900,18 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--energy_weight", help="weight of energy loss", type=float, default=1.0
+    )
+    parser.add_argument(
+        "--energy_weight_ramp_start",
+        help="initial energy loss weight for a linear epoch-based loss-weight ramp",
+        type=float,
+        default=None,
+    )
+    parser.add_argument(
+        "--loss_weight_ramp_epochs",
+        help="number of epochs over which configured ramp-start loss weights reach their target weights",
+        type=int,
+        default=0,
     )
     parser.add_argument(
         "--swa_energy_weight",
@@ -915,6 +959,12 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         help="weight of polarization loss",
         type=float,
         default=10.0,
+    )
+    parser.add_argument(
+        "--polarization_weight_ramp_start",
+        help="initial polarization loss weight for a linear epoch-based loss-weight ramp",
+        type=float,
+        default=None,
     )
     parser.add_argument(
         "--polarization_loss_mode",
@@ -970,6 +1020,12 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         help="weight of polarizability loss",
         type=float,
         default=1.0,
+    )
+    parser.add_argument(
+        "--polarizability_weight_ramp_start",
+        help="initial polarizability loss weight for a linear epoch-based loss-weight ramp",
+        type=float,
+        default=None,
     )
     parser.add_argument(
         "--polarizability_loss_mode",
@@ -1073,6 +1129,15 @@ def build_default_arg_parser() -> argparse.ArgumentParser:
         ),
         type=float,
         default=None,
+    )
+    parser.add_argument(
+        "--field_response_init_scale",
+        help=(
+            "initial multiplier for newly added MACEField field-response "
+            "modules when transferring from a non-MACEField foundation model"
+        ),
+        type=float,
+        default=1.0e-3,
     )
     parser.add_argument(
         "--lr_params_factors",

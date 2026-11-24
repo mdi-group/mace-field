@@ -56,3 +56,22 @@ Source and releases
 * `Released checkpoints and scripts
   <https://github.com/mdi-group/mace-field/releases>`_
 * `MACE documentation <https://mace-docs.readthedocs.io/>`_
+
+
+Package documentation
+---------------------
+
+The package guide covers the current installation, training, data, and
+calculator interfaces. The examples section links to the Colab-ready tutorial
+notebooks.
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Package Guide
+
+   package-overview
+   quick-start
+   guide/index
+   examples/index
+   references
+   development

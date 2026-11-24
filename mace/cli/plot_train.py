@@ -8,9 +8,9 @@ import os
 import re
 from typing import List
 
-# matplotlib/pandas are not mace-torch dependencies: guard the import so the
-# console entry point resolves (and --help works) in a clean install, and
-# main() can explain what to install instead of crashing with ImportError.
+# Plotting modules may be unavailable in minimal installs: guard the import so
+# the console entry point resolves (and --help works), and main() can explain
+# what to install instead of crashing with ImportError.
 try:
     import matplotlib.pyplot as plt
     import pandas as pd

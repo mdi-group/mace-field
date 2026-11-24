@@ -84,6 +84,7 @@ def test_default_parser_critical_defaults():
     assert args.max_num_epochs == 2048
     assert args.scaling == "rms_forces_scaling"
     assert args.seed == 123
+    assert args.ddp_find_unused_parameters is False
 
     # evaluation / data split
     assert args.error_table == "PerAtomRMSE"
@@ -94,6 +95,33 @@ def test_default_parser_critical_defaults():
     assert args.forces_key == "REF_forces"
     assert args.stress_key == "REF_stress"
     assert args.virials_key == "REF_virials"
+    assert args.hessian_key == "REF_hessian"
+    assert args.hessian_weight == 0.0
+    assert args.swa_hessian_weight == 0.0
+
+
+def test_ddp_find_unused_parameters_flag():
+    args = build_default_arg_parser().parse_args(
+        MINIMAL_ARGV + ["--ddp_find_unused_parameters=True"]
+    )
+    assert args.ddp_find_unused_parameters is True
+
+
+def test_force_hessian_flags_parse_with_stage_two_alias():
+    args = build_default_arg_parser().parse_args(
+        MINIMAL_ARGV
+        + [
+            "--hessian_key",
+            "my_hessian",
+            "--hessian_weight",
+            "0.25",
+            "--stage_two_hessian_weight",
+            "0.5",
+        ]
+    )
+    assert args.hessian_key == "my_hessian"
+    assert args.hessian_weight == 0.25
+    assert args.swa_hessian_weight == 0.5
 
 
 def test_stage_two_alias_maps_to_swa_dest():

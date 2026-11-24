@@ -96,6 +96,89 @@ def _weighted_config_mean(
     return local_sum / local_weight
 
 
+def hessian_pair_blocks_for_batch(ref: Batch, pred: TensorDict):
+    """Return predicted/reference Hessian blocks grouped by configuration.
+
+    References are stored as concatenated ``[N*N, 3, 3]`` blocks, while the
+    model returns ``[3*N_total, N_total, 3]``. Extracting diagonal graph blocks
+    supports mixed-size structures in a single PyG batch.
+    """
+    positions_hessian = pred["hessian"]
+    reference_hessian = ref["hessian"]
+    ptr = ref.ptr.tolist()
+    block_offset = 0
+    predictions = []
+    references = []
+    active_config_indices = []
+    hessian_weights = ref.hessian_weight.view(-1)
+    for graph_index, (start, stop) in enumerate(zip(ptr[:-1], ptr[1:])):
+        num_atoms = stop - start
+        num_pair_blocks = num_atoms * num_atoms
+        # Zero-weight structures carry an empty target tensor. Keep their
+        # predicted blocks out of the loss and advance the target offset only
+        # for configurations with stored labels.
+        if float(hessian_weights[graph_index]) == 0.0:
+            continue
+        predicted_blocks = positions_hessian[
+            3 * start : 3 * stop, start:stop, :
+        ].reshape(num_atoms, 3, num_atoms, 3)
+        predicted_blocks = predicted_blocks.permute(0, 2, 1, 3).reshape(
+            num_pair_blocks, 3, 3
+        )
+        predictions.append(predicted_blocks)
+        references.append(
+            reference_hessian[block_offset : block_offset + num_pair_blocks]
+        )
+        active_config_indices.append(graph_index)
+        block_offset += num_pair_blocks
+    if block_offset != reference_hessian.shape[0]:
+        raise ValueError(
+            "Packed Hessian labels do not match the atom counts in the batch"
+        )
+    return predictions, references, active_config_indices
+
+
+def hessian_hvp_residuals_for_batch(ref: Batch, pred: TensorDict):
+    """Project reference Hessians along the same sampled directions as MACE."""
+    predicted_hvps = pred["hessian"]
+    probes = getattr(ref, "hessian_probes", None)
+    if probes is None or predicted_hvps.ndim != 2:
+        raise ValueError("HVP Hessian predictions require their sampled probes")
+    probes = probes.reshape(predicted_hvps.shape[0], -1)
+    reference_hessian = ref.hessian
+    ptr = ref.ptr.tolist()
+    block_offset = 0
+    residuals = []
+    active_config_indices = []
+    hessian_weights = ref.hessian_weight.view(-1)
+    for graph_index, (start, stop) in enumerate(zip(ptr[:-1], ptr[1:])):
+        num_atoms = stop - start
+        num_dofs = 3 * num_atoms
+        num_pair_blocks = num_atoms * num_atoms
+        if float(hessian_weights[graph_index]) == 0.0:
+            continue
+        graph_probes = probes[:, 3 * start : 3 * stop].reshape(
+            probes.shape[0], num_atoms, 3
+        )
+        reference_blocks = reference_hessian[
+            block_offset : block_offset + num_pair_blocks
+        ].reshape(num_atoms, num_atoms, 3, 3)
+        # The force VJP computes H^T v. Hessians are expected to be symmetric,
+        # but this contraction also matches the stored matrix orientation if a
+        # source tensor has a small antisymmetric numerical component.
+        reference_hvp = torch.einsum(
+            "ijab,kia->kjb", reference_blocks, graph_probes
+        ).reshape(probes.shape[0], num_dofs)
+        residuals.append(
+            predicted_hvps[:, 3 * start : 3 * stop] - reference_hvp
+        )
+        active_config_indices.append(graph_index)
+        block_offset += num_pair_blocks
+    if block_offset != reference_hessian.shape[0]:
+        raise ValueError("Packed Hessian labels do not match the atom counts in the batch")
+    return residuals, active_config_indices
+
+
 def polarization_quantum_lattice(cell: torch.Tensor) -> torch.Tensor:
     cell = cell.view(-1, 3, 3)
     volume = torch.linalg.det(cell).abs().clamp_min(1e-30).view(-1, 1, 1)
@@ -756,6 +839,7 @@ class UniversalFieldLoss(torch.nn.Module):
         polarizability_loss_mode="standardized_symmetric_huber",
         polarizability_huber_delta=1.0,
         polarizability_scales=None,
+        hessian_weight=0.0,
     ) -> None:
         super().__init__()
         if polarization_loss_mode not in {"cartesian_huber", "normalized_metric"}:
@@ -787,6 +871,10 @@ class UniversalFieldLoss(torch.nn.Module):
         self.register_buffer(
             "forces_weight",
             torch.tensor(forces_weight, dtype=torch.get_default_dtype()),
+        )
+        self.register_buffer(
+            "hessian_weight",
+            torch.tensor(hessian_weight, dtype=torch.get_default_dtype()),
         )
         self.register_buffer(
             "stress_weight",
@@ -899,7 +987,7 @@ class UniversalFieldLoss(torch.nn.Module):
                 torch.any(ref_weight != 0).item()
             )
             has_ref = has_active_ref and (hasattr(ref, name) or (name in ref))
-            has_pred = name in pred
+            has_pred = name in pred and pred[name] is not None
 
             if float(weight_buf) == 0.0 or not has_active_ref:
                 # Skip globally disabled terms and batches without labels.  The
@@ -929,6 +1017,8 @@ class UniversalFieldLoss(torch.nn.Module):
         use_polarization = _require_key("polarization", self.polarization_weight)
         use_becs = _require_key("becs", self.becs_weight)
         use_polarizability = _require_key("polarizability", self.polarizability_weight)
+        use_stress = _require_key("stress", self.stress_weight)
+        use_hessian = _require_key("hessian", self.hessian_weight)
         polarization_huber_delta = (
             self.huber_delta * 5.0
             if self.polarization_huber_delta is None
@@ -957,6 +1047,49 @@ class UniversalFieldLoss(torch.nn.Module):
             ).view(-1, 3, 3)
         else:
             configs_becs_weight = None
+
+        if use_hessian:
+            if pred["hessian"].ndim == 2:
+                residuals, active_hessian_configs = hessian_hvp_residuals_for_batch(
+                    ref, pred
+                )
+                # For Rademacher v, E[|| (H-H_ref)^T v ||^2] equals
+                # ||H-H_ref||_F^2. This is therefore an unbiased estimate of
+                # the dense Hessian mean-squared loss, normalized by (3N)^2.
+                per_config_hessian_loss = torch.stack(
+                    [
+                        residual.square().sum()
+                        / (residual.shape[0] * residual.shape[1] ** 2)
+                        for residual in residuals
+                    ]
+                )
+            else:
+                (
+                    predicted_hessians,
+                    reference_hessians,
+                    active_hessian_configs,
+                ) = hessian_pair_blocks_for_batch(ref, pred)
+                per_config_hessian_loss = torch.stack(
+                    [
+                        torch.nn.functional.huber_loss(
+                            predicted,
+                            reference,
+                            reduction="none",
+                            delta=self.huber_delta,
+                        ).mean()
+                        for predicted, reference in zip(
+                            predicted_hessians, reference_hessians
+                        )
+                    ]
+                )
+            hessian_config_weight = (
+                ref.weight.view(-1) * ref.hessian_weight.view(-1)
+            )[active_hessian_configs]
+            loss_hessian = _weighted_config_mean(
+                per_config_hessian_loss, hessian_config_weight, ddp
+            )
+        else:
+            loss_hessian = torch.tensor(0.0, device=configs_energy_weight.device)
 
         # --- energy / forces / stress ---
         if ddp:
@@ -1039,12 +1172,17 @@ class UniversalFieldLoss(torch.nn.Module):
                 ddp=ddp,
             )
 
-            loss_stress = torch.nn.functional.huber_loss(
-                configs_stress_weight * ref["stress"],
-                configs_stress_weight * pred["stress"],
-                reduction="mean",
-                delta=self.huber_delta,
-            )
+            if use_stress:
+                loss_stress = torch.nn.functional.huber_loss(
+                    configs_stress_weight * ref["stress"],
+                    configs_stress_weight * pred["stress"],
+                    reduction="mean",
+                    delta=self.huber_delta,
+                )
+            else:
+                loss_stress = torch.tensor(
+                    0.0, device=configs_energy_weight.device
+                )
 
             if use_polarization:
                 if self.polarization_loss_mode == "normalized_metric":
@@ -1093,4 +1231,5 @@ class UniversalFieldLoss(torch.nn.Module):
             * loss_polarization
             + self.becs_weight * loss_becs
             + self.polarizability_weight * loss_polarizability
+            + self.hessian_weight * loss_hessian
         )

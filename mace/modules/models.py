@@ -416,6 +416,7 @@ class MACE(torch.nn.Module):
             compute_virials=compute_virials,
             compute_stress=compute_stress,
             compute_hessian=compute_hessian,
+            hessian_probes=data.get("hessian_probes"),
             compute_edge_forces=compute_edge_forces,
         )
 
@@ -604,6 +605,7 @@ class ScaleShiftMACE(MACE):
             compute_virials=compute_virials,
             compute_stress=compute_stress,
             compute_hessian=compute_hessian,
+            hessian_probes=data.get("hessian_probes"),
             compute_edge_forces=compute_edge_forces or compute_atomic_stresses,
         )
 
@@ -781,6 +783,9 @@ class AtomicDipolesMACE(torch.nn.Module):
         compute_displacement: bool = False,
         compute_edge_forces: bool = False,  # pylint: disable=W0613
         compute_atomic_stresses: bool = False,  # pylint: disable=W0613
+        compute_polarization: bool = False,  # pylint: disable=W0613
+        compute_becs: bool = False,  # pylint: disable=W0613
+        compute_polarizability: bool = False,  # pylint: disable=W0613
     ) -> Dict[str, Optional[torch.Tensor]]:
         assert compute_force is False
         assert compute_virials is False

@@ -6,6 +6,7 @@ from enum import Enum
 class DefaultKeys(Enum):
     ENERGY = "REF_energy"
     FORCES = "REF_forces"
+    HESSIAN = "REF_hessian"
     STRESS = "REF_stress"
     VIRIALS = "REF_virials"
     DIPOLE = "dipole"

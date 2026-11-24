@@ -1,5 +1,9 @@
 from .atomic_data import AtomicData
-from .hdf5_dataset import HDF5Dataset, dataset_from_sharded_hdf5
+from .hdf5_dataset import (
+    HDF5Dataset,
+    configurations_for_e0_estimation,
+    dataset_from_sharded_hdf5,
+)
 from .lmdb_dataset import LMDBDataset
 from .neighborhood import get_neighborhood
 from .padding_tools import build_fake_padding_graph
@@ -35,6 +39,7 @@ __all__ = [
     "save_dataset_as_HDF5",
     "HDF5Dataset",
     "dataset_from_sharded_hdf5",
+    "configurations_for_e0_estimation",
     "save_AtomicData_to_HDF5",
     "save_configurations_as_HDF5",
     "KeySpecification",

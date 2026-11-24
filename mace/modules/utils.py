@@ -192,6 +192,8 @@ def get_symmetric_displacement(
 def compute_hessians_vmap(
     forces: torch.Tensor,
     positions: torch.Tensor,
+    create_graph: bool = False,
+    probes: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     forces_flatten = forces.view(-1)
     num_elements = forces_flatten.shape[0]
@@ -202,18 +204,30 @@ def compute_hessians_vmap(
             positions,
             v,
             retain_graph=True,
-            create_graph=False,
+            create_graph=create_graph,
             allow_unused=False,
         )
 
-    I_N = torch.eye(num_elements).to(forces.device)
+    if probes is not None:
+        # A small number of vector-Jacobian products gives unbiased samples of
+        # the full Hessian Frobenius norm while avoiding the dense 3N x 3N
+        # prediction.  Keep these calls sequential: several MACE kernels do
+        # not support batched autograd/vmap, and the old fallback then built
+        # every Hessian row before the optimizer backward pass.
+        probes = probes.reshape(-1, num_elements)
+        hvps = [get_vjp(probe)[0].reshape(-1) for probe in probes]
+        return torch.stack(hvps, dim=0)
+
+    I_N = torch.eye(num_elements, device=forces.device, dtype=forces.dtype)
     try:
         chunk_size = 1 if num_elements < 64 else 16
         gradient = torch.vmap(get_vjp, in_dims=0, out_dims=0, chunk_size=chunk_size)(
             I_N
         )[0]
     except RuntimeError:
-        gradient = compute_hessians_loop(forces, positions)
+        gradient = compute_hessians_loop(
+            forces, positions, create_graph=create_graph
+        )
     if gradient is None:
         return torch.zeros((positions.shape[0], forces.shape[0], 3, 3))
     return gradient
@@ -223,6 +237,7 @@ def compute_hessians_vmap(
 def compute_hessians_loop(
     forces: torch.Tensor,
     positions: torch.Tensor,
+    create_graph: bool = False,
 ) -> torch.Tensor:
     hessian = []
     for grad_elem in forces.view(-1):
@@ -231,13 +246,14 @@ def compute_hessians_loop(
             inputs=[positions],
             grad_outputs=torch.ones_like(grad_elem),
             retain_graph=True,
-            create_graph=False,
+            create_graph=create_graph,
             allow_unused=False,
         )[0]
-        hess_row = hess_row.detach()  # this makes it very slow? but needs less memory
         if hess_row is None:
             hessian.append(torch.zeros_like(positions))
         else:
+            if not create_graph:
+                hess_row = hess_row.detach()
             hessian.append(hess_row)
     hessian = torch.stack(hessian)
     return hessian
@@ -347,6 +363,7 @@ def get_outputs(
     compute_virials: bool = True,
     compute_stress: bool = True,
     compute_hessian: bool = False,
+    hessian_probes: Optional[torch.Tensor] = None,
     compute_edge_forces: bool = False,
     compute_magforces: bool = False,
 ) -> Tuple[
@@ -407,7 +424,12 @@ def get_outputs(
         forces, virials, stress, mag_forces = (None, None, None, None)
     if compute_hessian:
         assert forces is not None, "Forces must be computed to get the hessian"
-        hessian = compute_hessians_vmap(forces, positions)
+        hessian = compute_hessians_vmap(
+            forces,
+            positions,
+            create_graph=training,
+            probes=hessian_probes,
+        )
     else:
         hessian = None
     if compute_edge_forces and vectors is not None:

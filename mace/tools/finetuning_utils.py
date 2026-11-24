@@ -201,6 +201,7 @@ def load_foundations_elements(
     use_scale=True,
     max_L=2,
     default_dtype: Optional[torch.dtype] = None,
+    field_response_init_scale: float = 1.0e-3,
 ):
     """Dispatch loader: magnetic models use a specialized skip-tp / magmom-skip-tp
     layout; everything else falls through to the default (vanilla MACE) path.
@@ -219,6 +220,7 @@ def load_foundations_elements(
         use_scale,
         max_L,
         default_dtype=default_dtype,
+        field_response_init_scale=field_response_init_scale,
     )
 
 
@@ -231,6 +233,7 @@ def load_foundations_elements_default(
     use_scale=True,
     max_L=2,
     default_dtype: Optional[torch.dtype] = None,
+    field_response_init_scale: float = 1.0e-3,
 ):
     """
     Load the foundations of a model into a model for fine-tuning.
@@ -626,7 +629,7 @@ def load_foundations_elements_default(
                 model.scale_shift.shift[pt_head_index] = foundation_shift
 
     if field_target and load_readout and is_mace_foundation_model(model_foundations):
-        _initialize_field_modules(model, scale=1.0e-3)
+        _initialize_field_modules(model, scale=field_response_init_scale)
 
     model_state = model.state_dict()
     foundation_state = model_foundations.state_dict()

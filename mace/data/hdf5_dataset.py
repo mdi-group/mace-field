@@ -1,5 +1,5 @@
-from glob import glob
-from typing import List
+from pathlib import Path
+from typing import List, Union
 
 import h5py
 import torch
@@ -70,6 +70,15 @@ class HDF5Dataset(Dataset):
         for key in subgrp["property_weights"]:
             property_weights[key] = unpack_value(subgrp["property_weights"][key][()])
 
+        # Configuration.head defaults to "Default", so pass the head here
+        # instead of relying on the None fallback below.  Grouped HDF5 files
+        # written before the head field was serialized inherit the dataset's
+        # configured head, which is the useful behavior for single-head files.
+        if "head" in subgrp:
+            head = unpack_value(subgrp["head"][()])
+        else:
+            head = self.kwargs.get("head", "Default")
+
         config = Configuration(
             atomic_numbers=subgrp["atomic_numbers"][()],
             positions=subgrp["positions"][()],
@@ -79,6 +88,7 @@ class HDF5Dataset(Dataset):
             config_type=unpack_value(subgrp["config_type"][()]),
             pbc=unpack_value(subgrp["pbc"][()]),
             cell=unpack_value(subgrp["cell"][()]),
+            head=head,
         )
         if config.head is None:
             config.head = self.kwargs.get("head")
@@ -91,6 +101,43 @@ class HDF5Dataset(Dataset):
         )
         return atomic_data
 
+    def iter_property_with_weight(self, property_name):
+        """Yield raw property and weight pairs without building atomic graphs.
+
+        This is used for dataset-wide metadata such as robust loss scales. It
+        supports both the grouped configuration schema and the direct
+        ``AtomicData`` schema used by older HDF5 exports.
+        """
+        def read(group, name):
+            if name not in group:
+                return None
+            return unpack_value(group[name][()])
+
+        with h5py.File(self.file_path, "r") as h5_file:
+            if self._direct_atomic_data:
+                for config_name in h5_file:
+                    group = h5_file[config_name]
+                    yield (
+                        read(group, property_name),
+                        read(group, f"{property_name}_weight"),
+                    )
+                return
+
+            for batch_name in h5_file:
+                batch = h5_file[batch_name]
+                for config_name in batch:
+                    config = batch[config_name]
+                    properties = config.get("properties")
+                    property_weights = config.get("property_weights")
+                    yield (
+                        read(properties, property_name)
+                        if properties is not None
+                        else None,
+                        read(property_weights, property_name)
+                        if property_weights is not None
+                        else None,
+                    )
+
     def _get_direct_atomic_data(self, index):
         """Read the flat ``save_dataset_as_HDF5`` representation."""
         group = self.file[f"config_{index}"]
@@ -99,6 +146,14 @@ class HDF5Dataset(Dataset):
             if name not in group:
                 return default
             return torch.as_tensor(group[name][()])
+
+        hessian = read("hessian")
+        hessian_weight = read("hessian_weight")
+        if hessian_weight is None:
+            hessian_weight = torch.tensor(
+                1.0 if hessian is not None else 0.0,
+                dtype=torch.get_default_dtype(),
+            )
 
         return self.atomic_dataclass(
             edge_index=read("edge_index"),
@@ -121,6 +176,8 @@ class HDF5Dataset(Dataset):
             magforces_weight=None,
             forces=read("forces"),
             energy=read("energy"),
+            hessian=hessian,
+            hessian_weight=hessian_weight,
             stress=read("stress"),
             virials=read("virials"),
             dipole=read("dipole"),
@@ -137,14 +194,83 @@ class HDF5Dataset(Dataset):
 
 
 def dataset_from_sharded_hdf5(
-    files: List, z_table: AtomicNumberTable, r_max: float, **kwargs
+    files: Union[str, Path], z_table: AtomicNumberTable, r_max: float, **kwargs
 ):
-    files = glob(files + "/*")
+    directory = Path(files)
+    files = sorted(
+        str(path)
+        for path in directory.iterdir()
+        if path.is_file() and path.suffix.lower() in (".h5", ".hdf5")
+    )
+    if not files:
+        raise FileNotFoundError(f"No .h5/.hdf5 shard files found in {directory!r}")
     datasets = []
     for file in files:
         datasets.append(HDF5Dataset(file, z_table=z_table, r_max=r_max, **kwargs))
     full_dataset = ConcatDataset(datasets)
     return full_dataset
+
+
+def configurations_for_e0_estimation(
+    files: Union[str, Path, List[Union[str, Path]]], head: str = "Default"
+):
+    """Yield light grouped-HDF5 configurations for foundation E0 estimation.
+
+    Only geometry and energy are loaded. In particular, large response and
+    Hessian arrays are not materialized while estimating per-element energy
+    offsets.
+    """
+    if isinstance(files, (str, Path)):
+        files = [files]
+
+    shards = []
+    for item in files:
+        path = Path(item)
+        if path.is_dir():
+            shards.extend(
+                sorted(
+                    shard
+                    for shard in path.iterdir()
+                    if shard.is_file()
+                    and shard.suffix.lower() in (".h5", ".hdf5")
+                )
+            )
+        elif path.is_file() and path.suffix.lower() in (".h5", ".hdf5"):
+            shards.append(path)
+        else:
+            raise ValueError(
+                f"E0 estimation expected grouped HDF5 files or directories, got {path}"
+            )
+
+    if not shards:
+        raise FileNotFoundError(f"No HDF5 shards found in {files!r}")
+
+    for shard in shards:
+        with h5py.File(shard, "r") as h5_file:
+            for batch in h5_file.values():
+                for subgroup in batch.values():
+                    properties = subgroup.get("properties")
+                    if properties is None or "energy" not in properties:
+                        continue
+                    energy = unpack_value(properties["energy"][()])
+                    if energy is None:
+                        continue
+                    weights = subgroup.get("property_weights")
+                    energy_weight = (
+                        unpack_value(weights["energy"][()])
+                        if weights is not None and "energy" in weights
+                        else 1.0
+                    )
+                    yield Configuration(
+                        atomic_numbers=subgroup["atomic_numbers"][()],
+                        positions=subgroup["positions"][()],
+                        properties={"energy": energy},
+                        property_weights={"energy": energy_weight},
+                        cell=unpack_value(subgroup["cell"][()]),
+                        pbc=unpack_value(subgroup["pbc"][()]),
+                        weight=1.0,
+                        head=head,
+                    )
 
 
 def unpack_value(value):

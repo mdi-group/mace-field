@@ -21,6 +21,36 @@ from mace.tools import (
 
 from .neighborhood import get_neighborhood
 
+
+def _hessian_to_pair_blocks(value, num_atoms: int) -> torch.Tensor:
+    """Pack a dense energy Hessian as ``[N*N, 3, 3]`` atom-pair blocks.
+
+    Accepted input layouts are the model/calculator layout ``[3N, N, 3]``,
+    a flattened or square ``[3N, 3N]`` matrix, and explicit atom/component
+    layouts ``[N, 3, N, 3]`` or ``[N, N, 3, 3]``. Pair-block packing lets
+    PyG concatenate Hessian labels for structures with different atom counts.
+    """
+    hessian = torch.as_tensor(value, dtype=torch.get_default_dtype())
+    n = num_atoms
+    if hessian.shape == (3 * n, n, 3):
+        blocks = hessian.reshape(n, 3, n, 3).permute(0, 2, 1, 3)
+    elif hessian.shape == (3 * n, 3 * n):
+        blocks = hessian.reshape(n, 3, n, 3).permute(0, 2, 1, 3)
+    elif hessian.shape == (n, 3, n, 3):
+        blocks = hessian.permute(0, 2, 1, 3)
+    elif hessian.shape == (n, n, 3, 3):
+        blocks = hessian
+    elif hessian.numel() == 9 * n * n:
+        blocks = hessian.reshape(n, 3, n, 3).permute(0, 2, 1, 3)
+    else:
+        raise ValueError(
+            f"Hessian for {n} atoms must contain {9 * n * n} values in a "
+            "[3N, N, 3], [3N, 3N], [N, 3, N, 3], or [N, N, 3, 3] layout; "
+            f"received shape {tuple(hessian.shape)}"
+        )
+    return blocks.reshape(n * n, 3, 3)
+
+
 if TYPE_CHECKING:
     from .utils import Configuration
 
@@ -38,6 +68,7 @@ class AtomicData(torch_geometric.data.Data):
     cell: torch.Tensor
     forces: torch.Tensor
     energy: torch.Tensor
+    hessian: torch.Tensor
     stress: torch.Tensor
     virials: torch.Tensor
     magmom: torch.Tensor
@@ -53,6 +84,7 @@ class AtomicData(torch_geometric.data.Data):
     weight: torch.Tensor
     energy_weight: torch.Tensor
     forces_weight: torch.Tensor
+    hessian_weight: torch.Tensor
     stress_weight: torch.Tensor
     virials_weight: torch.Tensor
     dipole_weight: torch.Tensor
@@ -108,10 +140,23 @@ class AtomicData(torch_geometric.data.Data):
         becs: Optional[torch.Tensor] = None,  # [n_nodes, 3, 3]
         polarization_weight: Optional[torch.Tensor] = None,
         becs_weight: Optional[torch.Tensor] = None,
+        hessian: Optional[torch.Tensor] = None,  # [n_nodes*n_nodes, 3, 3]
+        hessian_weight: Optional[torch.Tensor] = None,  # []
         **extra_data: torch.Tensor,
     ):
         # Check shapes
         num_nodes = node_attrs.shape[0]
+        if hessian_weight is None:
+            hessian_weight = torch.zeros(
+                (),
+                dtype=positions.dtype,
+                device=positions.device,
+            )
+        if hessian is None or float(hessian_weight) == 0.0:
+            # Missing labels should not allocate a dense O(N^2) placeholder.
+            hessian = torch.empty(
+                0, 3, 3, dtype=positions.dtype, device=positions.device
+            )
 
         assert edge_index.shape[0] == 2 and len(edge_index.shape) == 2
         assert positions.shape == (num_nodes, 3)
@@ -151,6 +196,13 @@ class AtomicData(torch_geometric.data.Data):
         assert volume is None or len(volume.shape) == 0
         assert fermi_level is None or len(fermi_level.shape) == 0
         assert external_field is None or external_field.shape == (1, 3)
+        assert hessian.shape in ((0, 3, 3), (num_nodes * num_nodes, 3, 3))
+        assert len(hessian_weight.shape) == 0
+        assert float(hessian_weight) == 0.0 or hessian.shape == (
+            num_nodes * num_nodes,
+            3,
+            3,
+        )
 
         # Aggregate data
         data = {
@@ -175,6 +227,8 @@ class AtomicData(torch_geometric.data.Data):
             "magforces_weight": magforces_weight,
             "forces": forces,
             "energy": energy,
+            "hessian": hessian,
+            "hessian_weight": hessian_weight,
             "stress": stress,
             "virials": virials,
             "dipole": dipole,
@@ -234,6 +288,19 @@ class AtomicData(torch_geometric.data.Data):
         )
 
         num_atoms = len(config.atomic_numbers)
+
+        hessian_value = config.properties.get("hessian")
+        hessian_weight = torch.tensor(
+            config.property_weights.get(
+                "hessian", 1.0 if hessian_value is not None else 0.0
+            ),
+            dtype=torch.get_default_dtype(),
+        )
+        hessian = (
+            _hessian_to_pair_blocks(hessian_value, num_atoms)
+            if hessian_value is not None and float(hessian_weight) != 0.0
+            else torch.empty(0, 3, 3, dtype=torch.get_default_dtype())
+        )
 
         weight = (
             torch.tensor(config.weight, dtype=torch.get_default_dtype())
@@ -527,6 +594,8 @@ class AtomicData(torch_geometric.data.Data):
             magforces_weight=magforces_weight,
             forces=forces,
             energy=energy,
+            hessian=hessian,
+            hessian_weight=hessian_weight,
             stress=stress,
             virials=virials,
             dipole=dipole,

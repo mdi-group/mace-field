@@ -1,0 +1,32 @@
+cff-version: 1.2.0
+message: "If you use MACE-Field, please cite the associated research article in preferred-citation."
+title: "MACE-Field: Electric-field-aware MACE models"
+type: software
+version: 1.1.0
+license: MIT
+repository-code: "https://github.com/mdi-group/mace-field"
+authors:
+  - name: "MACE-Field contributors"
+contact:
+  - given-names: "Bradley A. A."
+    family-names: Martin
+    email: "bradley.martin@ucl.ac.uk"
+preferred-citation:
+  type: article
+  authors:
+    - given-names: "Bradley A. A."
+      family-names: Martin
+    - given-names: "Alex M."
+      family-names: Ganose
+    - given-names: Venkat
+      family-names: Kapil
+    - given-names: Tingwei
+      family-names: Li
+    - given-names: "Keith T."
+      family-names: Butler
+  title: "General Learning of the Electric Response of Inorganic Materials"
+  journal: "PRX Intelligence"
+  volume: 1
+  issue: 1
+  year: 2026
+  doi: "10.1103/b116-xy8k"

@@ -59,6 +59,13 @@ def configure_model(
         "becs": args.compute_becs,
         "polarizability": args.compute_polarizability,
         "magforces": args.compute_magforces,
+        "hessian": (
+            getattr(args, "hessian_weight", 0.0) != 0.0
+            or (
+                getattr(args, "swa", False)
+                and getattr(args, "swa_hessian_weight", 0.0) != 0.0
+            )
+        ),
     }
     logging.info(
         f"During training the following quantities will be reported: {', '.join([f'{report}' for report, value in output_args.items() if value])}"
@@ -244,6 +251,9 @@ def configure_model(
                 load_readout=args.foundation_model_readout,
                 max_L=args.max_L,
                 default_dtype=dtype_dict.get(args.default_dtype, torch.float64),
+                field_response_init_scale=getattr(
+                    args, "field_response_init_scale", 1.0e-3
+                ),
             )
 
     return model, output_args

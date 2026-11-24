@@ -1027,8 +1027,10 @@ class MACECalculator(Calculator):
             raise ValueError("atoms not set")
         if atoms is None:
             atoms = self.atoms
-        if self.model_type not in ["MACE", "PolarMACE"]:
-            raise NotImplementedError("Only implemented for MACE/PolarMACE models")
+        if self.model_type not in ["MACE", "PolarMACE", "MACEField"]:
+            raise NotImplementedError(
+                "Only implemented for MACE, PolarMACE, and MACEField models"
+            )
         batch = self._atoms_to_batch(atoms)
         with torch_tools.default_dtype(self.default_dtype):
             hessians = [

@@ -1288,6 +1288,39 @@ def test_macefield_calculator_selects_response_outputs():
     assert calc.get_descriptors(atoms).shape[0] == len(atoms)
 
 
+def test_macefield_calculator_computes_unlabelled_higher_responses():
+    """Zero training weights must not suppress explicitly requested responses."""
+    atoms = Atoms(
+        "OH2",
+        positions=[(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+        cell=[6.0, 6.0, 6.0],
+        pbc=True,
+    )
+    with default_dtype(torch.float64):
+        model = MACEField(**MODEL_CONFIG)
+    calc = MACECalculator(
+        models=model,
+        model_type="MACEField",
+        device="cpu",
+        default_dtype="float64",
+        electric_field=[0.02, 0.01, -0.015],
+        compute_polarization=True,
+        compute_becs=True,
+        compute_polarizability=True,
+    )
+    atoms.calc = calc
+    atoms.get_potential_energy()
+
+    becs = np.asarray(calc.results["becs"])
+    polarizability = np.asarray(calc.results["polarizability"])
+    assert becs.shape == (len(atoms), 9)
+    assert polarizability.shape == (9,)
+    assert np.isfinite(becs).all()
+    assert np.isfinite(polarizability).all()
+    assert np.linalg.norm(becs) > 0.0
+    assert np.linalg.norm(polarizability) > 0.0
+
+
 def test_macefield_capability_detection_and_calculator_inference():
     """Wrapped field models are recognised and need no duplicate model_type."""
     with default_dtype(torch.float32):

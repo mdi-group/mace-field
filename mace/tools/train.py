@@ -6,6 +6,7 @@
 
 import dataclasses
 import logging
+import os
 import time
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
@@ -65,8 +66,9 @@ def _model_output_kwargs(
     batch,
     output_args: Dict[str, bool],
     training: bool,
+    loss_fn: Optional[torch.nn.Module] = None,
 ):
-    """Build output flags, enabling MACE-Field responses only when labelled."""
+    """Build model output flags, evaluating labelled MACE-Field responses."""
     kwargs = dict(
         training=training,
         compute_force=output_args["forces"],
@@ -81,6 +83,39 @@ def _model_output_kwargs(
     if model.__class__.__name__ != "MACEField":
         return kwargs
 
+    hessian_enabled = output_args.get("hessian", False)
+    if loss_fn is not None and hasattr(loss_fn, "hessian_weight"):
+        hessian_enabled = hessian_enabled and float(loss_fn.hessian_weight) != 0.0
+    if hessian_enabled:
+        hessian = _has_active_property_weight(batch, "hessian")
+        kwargs["compute_hessian"] = hessian
+        if hessian:
+            probe_env = (
+                "MACE_HESSIAN_HVP_PROBES"
+                if training
+                else "MACE_HESSIAN_VALIDATION_HVP_PROBES"
+            )
+            num_probes = int(
+                os.environ.get(
+                    probe_env, os.environ.get("MACE_HESSIAN_HVP_PROBES", "8")
+                )
+            )
+            if num_probes < 1:
+                raise ValueError("MACE_HESSIAN_HVP_PROBES must be positive")
+            probes = torch.randint(
+                0,
+                2,
+                (num_probes, batch.positions.numel()),
+                device=batch.positions.device,
+                dtype=torch.int64,
+            )
+            batch.hessian_probes = (
+                probes.to(dtype=batch.positions.dtype).mul_(2).sub_(1)
+            )
+        # A Hessian is a derivative of the forces, so obtain the force
+        # gradient even when force targets are disabled in the objective.
+        kwargs["compute_force"] = kwargs["compute_force"] or hessian
+
     polarization = output_args.get(
         "polarization", False
     ) and _has_active_property_weight(batch, "polarization")
@@ -90,11 +125,52 @@ def _model_output_kwargs(
     ) and _has_active_property_weight(batch, "polarizability")
     # BECs and polarizabilities are derived from polarization, so they imply
     # the first response even when no standalone polarization label is present.
-    if polarization or becs or polarizability:
-        kwargs["compute_polarization"] = polarization or becs or polarizability
-        kwargs["compute_becs"] = becs
-        kwargs["compute_polarizability"] = polarizability
+    kwargs["compute_polarization"] = polarization or becs or polarizability
+    kwargs["compute_becs"] = becs
+    kwargs["compute_polarizability"] = polarizability
     return kwargs
+
+
+def _attach_hessian_probes(batch, batch_dict, model_kwargs):
+    """Pass sampled HVP directions through the model and loss reference."""
+    probes = getattr(batch, "hessian_probes", None)
+    if probes is not None:
+        batch.hessian_probes = probes
+        batch_dict["hessian_probes"] = probes
+    return model_kwargs
+
+
+def _hessian_pair_blocks_for_metrics(batch, output):
+    """Extract labeled Hessian blocks for validation diagnostics."""
+    positions_hessian = output["hessian"]
+    reference_hessian = batch.hessian
+    ptr = batch.ptr.tolist()
+    hessian_weights = batch.hessian_weight.view(-1)
+    block_offset = 0
+    predictions = []
+    references = []
+    graph_indices = []
+    for graph_index, (start, stop) in enumerate(zip(ptr[:-1], ptr[1:])):
+        if float(hessian_weights[graph_index]) == 0.0:
+            continue
+        num_atoms = stop - start
+        num_pair_blocks = num_atoms * num_atoms
+        predicted_blocks = positions_hessian[
+            3 * start : 3 * stop, start:stop, :
+        ].reshape(num_atoms, 3, num_atoms, 3)
+        predictions.append(
+            predicted_blocks.permute(0, 2, 1, 3).reshape(num_pair_blocks, 3, 3)
+        )
+        references.append(
+            reference_hessian[block_offset : block_offset + num_pair_blocks]
+        )
+        graph_indices.append(graph_index)
+        block_offset += num_pair_blocks
+    if block_offset != reference_hessian.shape[0]:
+        raise ValueError(
+            "Packed Hessian labels do not match the atom counts in the batch"
+        )
+    return predictions, references, graph_indices
 
 
 def polarizability_log_eigenvalue_error(
@@ -144,6 +220,20 @@ def valid_err_log(
         inintial_phrase = "Initial"
     else:
         inintial_phrase = f"Epoch {epoch}"
+    if eval_metrics.get("rmse_hessian") is None:
+        hessian_rmse_summary = "RMSE_Hessian=None"
+    elif eval_metrics.get("hessian_metric") == "randomized_hvp_rmse_estimate":
+        hessian_rmse_summary = (
+            f"RMSE_Hessian_HVP_estimate={eval_metrics['rmse_hessian']:.8f} eV / A^2"
+        )
+    else:
+        hessian_rmse_summary = (
+            f"RMSE_Hessian={eval_metrics['rmse_hessian']:.8f} eV / A^2"
+        )
+
+    def log_metric_line(message):
+        logging.info(f"{message}, {hessian_rmse_summary}")
+
     if log_errors == "PerAtomFieldRMSE":
         # Field models use a dedicated error table.  This branch is kept in
         # the per-epoch path as well as in tables_utils so training logs show
@@ -154,7 +244,7 @@ def valid_err_log(
         error_polarization = eval_metrics["rmse_polarization"] * 1e3
         error_becs = eval_metrics["rmse_becs"]
         error_polarizability = eval_metrics["rmse_polarizability"]
-        logging.info(
+        log_metric_line(
             f"{inintial_phrase}: head: {valid_loader_name}, "
             f"loss={valid_loss:8.8f}, "
             f"RMSE_E_per_atom={error_e:8.2f} meV, "
@@ -167,7 +257,7 @@ def valid_err_log(
     elif log_errors == "PerAtomRMSE":
         error_e = eval_metrics["rmse_e_per_atom"] * 1e3
         error_f = eval_metrics["rmse_f"] * 1e3
-        logging.info(
+        log_metric_line(
             f"{inintial_phrase}: head: {valid_loader_name}, loss={valid_loss:8.8f}, RMSE_E_per_atom={error_e:8.2f} meV, RMSE_F={error_f:8.2f} meV / A"
         )
     elif (
@@ -186,7 +276,7 @@ def valid_err_log(
             if errors_magforces is not None
             else ""
         )
-        logging.info(msg)
+        log_metric_line(msg)
     elif (
         log_errors == "PerAtomRMSEstressvirials"
         and eval_metrics["rmse_virials_per_atom"] is not None
@@ -194,7 +284,7 @@ def valid_err_log(
         error_e = eval_metrics["rmse_e_per_atom"] * 1e3
         error_f = eval_metrics["rmse_f"] * 1e3
         error_virials = eval_metrics["rmse_virials_per_atom"] * 1e3
-        logging.info(
+        log_metric_line(
             f"{inintial_phrase}: head: {valid_loader_name}, loss={valid_loss:8.8f}, RMSE_E_per_atom={error_e:8.2f} meV, RMSE_F={error_f:8.2f} meV / A, RMSE_virials_per_atom={error_virials:8.2f} meV",
         )
     elif (
@@ -204,7 +294,7 @@ def valid_err_log(
         error_e = eval_metrics["mae_e_per_atom"] * 1e3
         error_f = eval_metrics["mae_f"] * 1e3
         error_stress = eval_metrics["mae_stress"] * 1e3
-        logging.info(
+        log_metric_line(
             f"{inintial_phrase}: head: {valid_loader_name}, loss={valid_loss:8.8f}, MAE_E_per_atom={error_e:8.2f} meV, MAE_F={error_f:8.2f} meV / A, MAE_stress={error_stress:8.2f} meV / A^3"
         )
     elif (
@@ -214,43 +304,43 @@ def valid_err_log(
         error_e = eval_metrics["mae_e_per_atom"] * 1e3
         error_f = eval_metrics["mae_f"] * 1e3
         error_virials = eval_metrics["mae_virials"] * 1e3
-        logging.info(
+        log_metric_line(
             f"{inintial_phrase}: head: {valid_loader_name}, loss={valid_loss:8.8f}, MAE_E_per_atom={error_e:8.2f} meV, MAE_F={error_f:8.2f} meV / A, MAE_virials={error_virials:8.2f} meV"
         )
     elif log_errors == "TotalRMSE":
         error_e = eval_metrics["rmse_e"] * 1e3
         error_f = eval_metrics["rmse_f"] * 1e3
-        logging.info(
+        log_metric_line(
             f"{inintial_phrase}: head: {valid_loader_name}, loss={valid_loss:8.8f}, RMSE_E={error_e:8.2f} meV, RMSE_F={error_f:8.2f} meV / A",
         )
     elif log_errors == "PerAtomMAE":
         error_e = eval_metrics["mae_e_per_atom"] * 1e3
         error_f = eval_metrics["mae_f"] * 1e3
-        logging.info(
+        log_metric_line(
             f"{inintial_phrase}: head: {valid_loader_name}, loss={valid_loss:8.8f}, MAE_E_per_atom={error_e:8.2f} meV, MAE_F={error_f:8.2f} meV / A",
         )
     elif log_errors == "TotalMAE":
         error_e = eval_metrics["mae_e"] * 1e3
         error_f = eval_metrics["mae_f"] * 1e3
-        logging.info(
+        log_metric_line(
             f"{inintial_phrase}: head: {valid_loader_name}, loss={valid_loss:8.8f}, MAE_E={error_e:8.2f} meV, MAE_F={error_f:8.2f} meV / A",
         )
     elif log_errors == "DipoleRMSE":
         error_mu = eval_metrics["rmse_mu_per_atom"] * 1e3
-        logging.info(
+        log_metric_line(
             f"{inintial_phrase}: head: {valid_loader_name}, loss={valid_loss:8.8f}, RMSE_MU_per_atom={error_mu:8.2f} mDebye",
         )
     elif log_errors == "DipolePolarRMSE":
         error_mu = eval_metrics["rmse_mu_per_atom"] * 1e3
         error_polarizability = eval_metrics["rmse_polarizability_per_atom"] * 1e3
-        logging.info(
+        log_metric_line(
             f"{inintial_phrase}: head: {valid_loader_name}, loss={valid_loss:.4f}, RMSE_MU_per_atom={error_mu:.2f} me A, RMSE_polarizability_per_atom={error_polarizability:.2f} me A^2 / V",
         )
     elif log_errors == "EnergyDipoleRMSE":
         error_e = eval_metrics["rmse_e_per_atom"] * 1e3
         error_f = eval_metrics["rmse_f"] * 1e3
         error_mu = eval_metrics["rmse_mu_per_atom"] * 1e3
-        logging.info(
+        log_metric_line(
             f"{inintial_phrase}: head: {valid_loader_name}, loss={valid_loss:8.8f}, RMSE_E_per_atom={error_e:8.2f} meV, RMSE_F={error_f:8.2f} meV / A, RMSE_Mu_per_atom={error_mu:8.2f} mDebye",
         )
 
@@ -282,6 +372,13 @@ def train(
     train_sampler: Optional[DistributedSampler] = None,
     rank: Optional[int] = 0,
     data_aug_magmom: Optional[bool] = False,
+    loss_weight_ramp_epochs: int = 0,
+    energy_weight_ramp_start: Optional[float] = None,
+    energy_weight_ramp_end: Optional[float] = None,
+    polarization_weight_ramp_start: Optional[float] = None,
+    polarization_weight_ramp_end: Optional[float] = None,
+    polarizability_weight_ramp_start: Optional[float] = None,
+    polarizability_weight_ramp_end: Optional[float] = None,
 ):
     lowest_loss = np.inf
     valid_loss = np.inf
@@ -293,6 +390,73 @@ def train(
 
     if max_grad_norm is not None:
         logging.info(f"Using gradient clipping with tolerance={max_grad_norm:.3f}")
+
+    loss_weight_ramps = {}
+    if loss_weight_ramp_epochs < 0:
+        raise ValueError("loss_weight_ramp_epochs must be non-negative")
+    if loss_weight_ramp_epochs > 0:
+        ramp_specs = (
+            ("energy_weight", energy_weight_ramp_start, energy_weight_ramp_end),
+            (
+                "polarization_weight",
+                polarization_weight_ramp_start,
+                polarization_weight_ramp_end,
+            ),
+            (
+                "polarizability_weight",
+                polarizability_weight_ramp_start,
+                polarizability_weight_ramp_end,
+            ),
+        )
+        for name, start_weight, end_weight in ramp_specs:
+            if start_weight is None or end_weight is None:
+                raise ValueError(
+                    f"Both start and end weights are required to ramp {name}"
+                )
+            weight_tensor = getattr(loss_fn, name, None)
+            if weight_tensor is None or not torch.is_tensor(weight_tensor):
+                raise ValueError(
+                    f"Loss function {type(loss_fn).__name__} does not expose {name}"
+                )
+            loss_weight_ramps[name] = (
+                weight_tensor,
+                float(start_weight),
+                float(end_weight),
+            )
+            with torch.no_grad():
+                weight_tensor.fill_(float(start_weight))
+            logging.info(
+                "Loss weight ramp %s: %.6g -> %.6g over %d epochs",
+                name,
+                start_weight,
+                end_weight,
+                loss_weight_ramp_epochs,
+            )
+
+    def apply_loss_weight_ramp(epoch_index: int) -> None:
+        if not loss_weight_ramps:
+            return
+        if loss_weight_ramp_epochs <= 1:
+            fraction = 1.0
+        else:
+            fraction = min(
+                max((epoch_index - start_epoch) / (loss_weight_ramp_epochs - 1), 0.0),
+                1.0,
+            )
+        current_values = {}
+        with torch.no_grad():
+            for name, (weight_tensor, start_weight, end_weight) in loss_weight_ramps.items():
+                current_weight = start_weight + fraction * (end_weight - start_weight)
+                weight_tensor.fill_(current_weight)
+                current_values[name] = current_weight
+        if rank == 0:
+            logging.info(
+                "Epoch %d loss weights: energy=%.6g polarization=%.6g polarizability=%.6g",
+                epoch_index,
+                current_values["energy_weight"],
+                current_values["polarization_weight"],
+                current_values["polarizability_weight"],
+            )
 
     logging.info("")
     logging.info("===========TRAINING===========")
@@ -324,6 +488,7 @@ def train(
         train_loader = create_random_rotation_loader(train_loader)
 
     while epoch < max_num_epochs:
+        apply_loss_weight_ramp(epoch)
         # LR scheduler and SWA update
         if swa is None or epoch < swa.start:
             if epoch > start_epoch:
@@ -535,9 +700,16 @@ def take_step(
 
     def closure():
         optimizer.zero_grad(set_to_none=True)
-        kwargs = _model_output_kwargs(model, batch, output_args, training=True)
+        kwargs = _model_output_kwargs(
+            model, batch, output_args, training=True, loss_fn=loss_fn
+        )
+        kwargs = _attach_hessian_probes(batch, batch_dict, kwargs)
         output = model(batch_dict, **kwargs)
-        loss = loss_fn(pred=output, ref=batch)
+        # DDP synchronizes parameter gradients after backward.  Do not also
+        # reduce the scalar loss here: multi-head batches can activate
+        # different property terms on different ranks, so their conditional
+        # loss reductions would issue different collective sequences.
+        loss = loss_fn(pred=output, ref=batch, ddp=False)
         loss.backward()
         if max_grad_norm is not None:
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
@@ -604,9 +776,16 @@ def take_step_lbfgs(
         for batch in data_loader:
             batch = batch.to(device)
             batch_dict = batch.to_dict()
-            kwargs = _model_output_kwargs(model, batch, output_args, training=True)
+            kwargs = _model_output_kwargs(
+                model, batch, output_args, training=True, loss_fn=loss_fn
+            )
+            kwargs = _attach_hessian_probes(batch, batch_dict, kwargs)
             output = model(batch_dict, **kwargs)
-            batch_loss = loss_fn(pred=output, ref=batch)
+            # As in the Adam path, keep the optimization loss local.  The
+            # explicit parameter broadcasts/all-reduces below handle LBFGS;
+            # conditional per-property loss reductions are not rank-safe for
+            # heterogeneous multi-head batches.
+            batch_loss = loss_fn(pred=output, ref=batch, ddp=False)
             batch_loss = batch_loss * (batch.num_graphs / total_sample_count)
 
             batch_loss.backward()
@@ -681,7 +860,10 @@ def evaluate(
         for batch in data_loader:
             batch = batch.to(device)
             batch_dict = batch.to_dict()
-            kwargs = _model_output_kwargs(model, batch, output_args, training=False)
+            kwargs = _model_output_kwargs(
+                model, batch, output_args, training=False, loss_fn=loss_fn
+            )
+            kwargs = _attach_hessian_probes(batch, batch_dict, kwargs)
             output = model(batch_dict, **kwargs)
             avg_loss, aux = metrics(batch, output)
     avg_loss, aux = metrics.compute()
@@ -744,6 +926,19 @@ class MACELoss(Metric):
         )
         self.add_state("MagFs", default=[], dist_reduce_fx="cat")
         self.add_state("delta_MagFs", default=[], dist_reduce_fx="cat")
+        self.add_state(
+            "hessian_computed", default=torch.tensor(0.0), dist_reduce_fx="sum"
+        )
+        self.add_state(
+            "hessian_squared_error", default=torch.tensor(0.0), dist_reduce_fx="sum"
+        )
+        self.add_state(
+            "hessian_absolute_error", default=torch.tensor(0.0), dist_reduce_fx="sum"
+        )
+        self.add_state(
+            "hessian_hvp_computed", default=torch.tensor(0.0), dist_reduce_fx="sum"
+        )
+        self.add_state("hessian_numel", default=torch.tensor(0.0), dist_reduce_fx="sum")
 
     def update(self, batch, output):  # pylint: disable=arguments-differ
         # Validation is evaluated independently by every distributed rank.
@@ -774,6 +969,54 @@ class MACELoss(Metric):
                 batch.forces_weight,
                 spread_atoms=True,
             )
+
+        if output.get("hessian") is not None and batch.hessian is not None:
+            hessian_active = (
+                batch.weight.view(-1) * batch.hessian_weight.view(-1)
+            ) != 0
+            if torch.any(hessian_active):
+                self.hessian_computed += hessian_active.sum()
+                if output["hessian"].ndim == 2:
+                    # Delayed import avoids the mace.tools -> train -> loss ->
+                    # mace.tools package initialization cycle.
+                    from mace.modules.loss import hessian_hvp_residuals_for_batch
+
+                    residuals, active_hessian_configs = (
+                        hessian_hvp_residuals_for_batch(batch, output)
+                    )
+                    for graph_index, residual in zip(
+                        active_hessian_configs, residuals
+                    ):
+                        if not bool(hessian_active[graph_index].item()):
+                            continue
+                        # Average projected squared norms over probes to
+                        # estimate the dense Frobenius error without forming H.
+                        self.hessian_squared_error += (
+                            residual.square().sum() / residual.shape[0]
+                        )
+                        self.hessian_numel += residual.shape[1] ** 2
+                    self.hessian_hvp_computed += hessian_active.sum()
+                else:
+                    (
+                        predicted_blocks,
+                        reference_blocks,
+                        active_hessian_configs,
+                    ) = _hessian_pair_blocks_for_metrics(batch, output)
+                    residual = torch.cat(
+                        [
+                            predicted - reference
+                            for graph_index, predicted, reference in zip(
+                                active_hessian_configs,
+                                predicted_blocks,
+                                reference_blocks,
+                            )
+                            if bool(hessian_active[graph_index].item())
+                        ],
+                        dim=0,
+                    )
+                    self.hessian_squared_error += residual.square().sum()
+                    self.hessian_absolute_error += residual.abs().sum()
+                    self.hessian_numel += residual.numel()
 
         if output.get("magforces") is not None and batch.magforces is not None:
             self.MagFs.append(batch.magforces)
@@ -913,6 +1156,20 @@ class MACELoss(Metric):
             aux["rmse_f"] = compute_rmse(delta_fs)
             aux["rel_rmse_f"] = compute_rel_rmse(delta_fs, fs)
             aux["q95_f"] = compute_q95(delta_fs)
+        if self.hessian_numel:
+            if self.hessian_hvp_computed:
+                aux["mae_hessian"] = None
+                aux["hessian_metric"] = "randomized_hvp_rmse_estimate"
+                aux["rmse_hessian_hvp_estimate"] = to_numpy(
+                    torch.sqrt(self.hessian_squared_error / self.hessian_numel)
+                ).item()
+            else:
+                aux["mae_hessian"] = to_numpy(
+                    self.hessian_absolute_error / self.hessian_numel
+                ).item()
+            aux["rmse_hessian"] = to_numpy(
+                torch.sqrt(self.hessian_squared_error / self.hessian_numel)
+            ).item()
         if self.MagFs_computed:
             MagFs = self.convert(self.MagFs)
             delta_MagFs = self.convert(self.delta_MagFs)

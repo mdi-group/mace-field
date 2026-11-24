@@ -124,9 +124,11 @@ def run(args) -> None:
         logging.info(f"Processes: {world_size}")
 
     try:
-        logging.info(f"MACE version: {mace.__version__}")
+        logging.info(f"MACE-Field version: {mace.__version__}")
     except AttributeError:
-        logging.info("Cannot find MACE version, please install MACE via pip")
+        logging.info(
+            "Cannot find MACE-Field version; install mace-field-torch or use an editable source install"
+        )
     logging.debug(f"Configuration: {args}")
 
     tools.set_default_dtype(args.default_dtype)
@@ -537,7 +539,6 @@ def run(args) -> None:
                 }
             elif head_config.E0s.lower() == "estimated":
                 assert args.foundation_model is not None, "Foundation model must be provided for E0s estimation"
-                assert all(check_path_ase_read(f) for f in head_config.train_file), "E0s estimation requires training data in .xyz format"
                 logging.info("Estimating E0s from foundation model predictions on training data")
                 z_table_foundation = AtomicNumberTable(
                     [int(z) for z in model_foundation.atomic_numbers]
@@ -554,10 +555,19 @@ def run(args) -> None:
                     ].item()
                     for z in z_table_foundation.zs
                 }
+                if all(check_path_ase_read(f) for f in head_config.train_file):
+                    configurations_train = head_config.collections.train
+                else:
+                    logging.info(
+                        "Reading only geometry and energy from grouped HDF5 for E0 estimation"
+                    )
+                    configurations_train = data.configurations_for_e0_estimation(
+                        head_config.train_file, head=head_config.head_name
+                    )
                 atomic_energies_dict[head_config.head_name] = data.estimate_e0s_from_foundation(
                     foundation_model=model_foundation,
                     foundation_e0s=foundation_e0s,
-                    collections_train=head_config.collections.train,
+                    collections_train=configurations_train,
                     z_table=head_config.z_table,
                     device=device,
                 )
@@ -830,12 +840,32 @@ def run(args) -> None:
         head_configs,
         heads,
         core_max_norm=args.polarizability_scale_core_max_norm,
+        train_datasets_by_head=train_sets,
     )
     loss_fn = get_loss_fn(
         args,
         dipole_only,
         args.compute_dipole,
         polarizability_scales=polarizability_scales,
+    )
+    if args.loss_weight_ramp_epochs < 0:
+        raise ValueError("--loss_weight_ramp_epochs must be non-negative")
+    if args.loss_weight_ramp_epochs > 0 and args.swa:
+        raise ValueError("Loss-weight ramps are not supported together with --swa")
+    energy_weight_ramp_start = (
+        args.energy_weight
+        if args.energy_weight_ramp_start is None
+        else args.energy_weight_ramp_start
+    )
+    polarization_weight_ramp_start = (
+        args.polarization_weight
+        if args.polarization_weight_ramp_start is None
+        else args.polarization_weight_ramp_start
+    )
+    polarizability_weight_ramp_start = (
+        args.polarizability_weight
+        if args.polarizability_weight_ramp_start is None
+        else args.polarizability_weight_ramp_start
     )
     args.avg_num_neighbors = get_avg_num_neighbors(head_configs, args, train_loader, device)
 
@@ -1001,7 +1031,9 @@ def run(args) -> None:
         # CPU (gloo) requires device_ids=None. xpu counts as an accelerator:
         # narrowing this to cuda alone silently gave XPU runs a CPU-style DDP.
         distributed_model = DDP(
-            model, device_ids=[local_rank] if args.device in ("cuda", "xpu") else None
+            model,
+            device_ids=[local_rank] if args.device in ("cuda", "xpu") else None,
+            find_unused_parameters=args.ddp_find_unused_parameters,
         )
     else:
         distributed_model = None
@@ -1075,6 +1107,13 @@ def run(args) -> None:
         train_sampler=train_sampler,
         rank=rank,
         data_aug_magmom=args.data_aug_magmom,
+        loss_weight_ramp_epochs=args.loss_weight_ramp_epochs,
+        energy_weight_ramp_start=energy_weight_ramp_start,
+        energy_weight_ramp_end=args.energy_weight,
+        polarization_weight_ramp_start=polarization_weight_ramp_start,
+        polarization_weight_ramp_end=args.polarization_weight,
+        polarizability_weight_ramp_start=polarizability_weight_ramp_start,
+        polarizability_weight_ramp_end=args.polarizability_weight,
     )
 
     logging.info("")
@@ -1169,7 +1208,11 @@ def run(args) -> None:
             for param in model.parameters():
                 param.requires_grad = True
             distributed_model = DDP(
-                model, device_ids=[local_rank] if args.device in ("cuda", "xpu") else None
+                model,
+                device_ids=[local_rank]
+                if args.device in ("cuda", "xpu")
+                else None,
+                find_unused_parameters=args.ddp_find_unused_parameters,
             )
         model_to_evaluate = model if not args.distributed else distributed_model
         if swa_eval:

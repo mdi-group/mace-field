@@ -2,7 +2,7 @@ name: extension tests
 # One job per optional dependency ("extension"), each guaranteeing its
 # capability via MACE_REQUIRE_CAPS: a broken install fails, never skips.
 # On PRs, paths-filter runs only the extensions the PR can affect; pushes to
-# main/develop always run everything (the safety net lives on the branch).
+# main/clean always run everything (the safety net lives on the branch).
 # Adding an extension = tests/extensions/<name>/ + a filter entry + a job.
 
 on:
@@ -12,7 +12,7 @@ on:
   # on their own schedule).
   workflow_call:
   push:
-    branches: [ main, develop ]
+    branches: [ main, clean ]
 
 permissions:
   contents: read

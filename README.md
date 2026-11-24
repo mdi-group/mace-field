@@ -4,6 +4,8 @@
 
 # MACE-Field: Electric-Field-Aware MACE Models
 
+[![Paper: PRX Intelligence](https://img.shields.io/badge/Paper-PRX%20Intelligence-blue)](https://doi.org/10.1103/b116-xy8k)
+
 [![Core tests](https://github.com/mdi-group/mace-field/actions/workflows/ci-core.yaml/badge.svg?branch=main)](https://github.com/mdi-group/mace-field/actions/workflows/ci-core.yaml)
 [![Extension tests](https://github.com/mdi-group/mace-field/actions/workflows/ci-extensions.yaml/badge.svg?branch=main)](https://github.com/mdi-group/mace-field/actions/workflows/ci-extensions.yaml)
 [![Integration tests](https://github.com/mdi-group/mace-field/actions/workflows/ci-integrations.yaml/badge.svg?branch=main)](https://github.com/mdi-group/mace-field/actions/workflows/ci-integrations.yaml)
@@ -35,11 +37,21 @@ initialized from a foundation model.
 
 ## Installation
 
+Install a PyTorch build that matches your hardware by following the
+[PyTorch installation selector](https://pytorch.org/get-started/locally/).
+After the first PyPI release, install MACE-Field with:
+
+```bash
+python -m pip install mace-field-torch
+```
+
 ```bash
 git clone https://github.com/mdi-group/mace-field.git
 cd mace-field
 python -m pip install -e .
 ```
+
+The distribution is named `mace-field-torch` and installs under the existing `mace` Python import name. Do not install it in the same environment as `mace-torch`; both distributions provide that import package.
 
 The generic MACE installation, training, CUDA, and foundation-model guides are
 available in the [MACE documentation](https://mace-docs.readthedocs.io/).
@@ -71,6 +83,13 @@ and a [dielectric/ferroelectric replay set](https://github.com/mdi-group/mace-fi
 MACE-Field extends `ScaleShiftMACE` in `mace.modules.extensions`. The uniform
 electric field enters as the equivariant `1o` irrep between interaction layers;
 the energy remains the scalar readout.
+
+## Tutorials
+
+The notebooks, example datasets, and Colab launchers are maintained in the
+[MACE-Field tutorials repository](https://github.com/mdi-group/mace-field-tutorial).
+It includes a MACEField architecture and training sequence, a finite-field ASE
+molecular-dynamics workflow, and a broader MACE extension lab.
 
 ## Data format
 
@@ -328,6 +347,10 @@ supported by this interface; use the ASE calculator when the field changes
 between steps.
 
 ## Development and tests
+
+Contribution steps, development setup, and package release guidance are in
+[CONTRIBUTING.md](CONTRIBUTING.md). The current package version is `1.1.0`; see
+[CHANGELOG.md](CHANGELOG.md) for the release notes.
 
 Install development dependencies and enable the repository hooks:
 
