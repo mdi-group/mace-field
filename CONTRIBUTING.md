@@ -30,8 +30,8 @@ python -m pip install -e '.[dev]'
 pre-commit install
 ```
 
-The `mace-field-torch` distribution and upstream `mace-torch` both install the
-`mace` Python package. Use a clean environment and do not install both.
+This checkout and upstream MACE both provide the `mace` Python package. Use a
+clean environment and do not install both in the same environment.
 
 ## Check your change
 
@@ -51,8 +51,8 @@ Run the repository format and lint hooks with:
 pre-commit run --all-files
 ```
 
-The project release line follows the existing MACE-Field tags. The next planned
-version is `1.1.0`; release tags must match `mace.__version__` exactly.
+The project release line follows the existing MACE-Field tags. Release tags
+must match `mace.__version__` exactly.
 
 Update the user guide or examples when a change affects user-facing behavior.
 Keep fixtures small and deterministic; do not commit training outputs, model

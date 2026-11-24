@@ -30,12 +30,15 @@ polarizability = calc.results["polarizability"]
 ```
 
 Response flags can be selected independently. BECs and polarizability require
-polarization internally. The returned response tensors are:
+polarization internally. For a MACE-Field model, unspecified response flags
+retain the historical default of calculating all three response outputs; set
+unused flags to `False` to skip their derivatives. The returned response
+tensors are:
 
 - `polarization`: one three-vector per structure.
 - `becs`: one `3 × 3` tensor per atom.
 - `polarizability`: one `3 × 3` tensor per structure, reported as the
-  dimensionless electric susceptibility.
+  dimensionless relative electric susceptibility in `ε₀` units.
 
 ## Changing the field
 

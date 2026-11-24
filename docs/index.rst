@@ -9,69 +9,29 @@ This guide covers MACE-Field-specific workflows. For general MACE installation,
 training options, acceleration backends, and foundation-model details, see the
 `MACE documentation <https://mace-docs.readthedocs.io/>`_.
 
-Getting started
----------------
+Start with :doc:`quick-start`, then use the guide pages for data preparation,
+training, fine-tuning, evaluation, and deployment. The examples page links to
+the Colab-ready tutorials.
 
-Start with the :doc:`quick_start` to install this repository and evaluate the
-released MH-0 checkpoint.
+.. toctree::
+   :maxdepth: 2
+   :caption: Quick Start
 
-User guide
-----------
+   quick-start
 
 .. toctree::
    :maxdepth: 2
    :caption: User Guide
 
-   quick_start
-   user_guide/data
-   user_guide/training
-   user_guide/inference
-   user_guide/hdf5
-
-Model outputs
--------------
-
-For a model energy :math:`E(\mathbf{R}, \boldsymbol{\mathcal{E}})`, the field
-response is derived from the same scalar:
-
-.. math::
-
-   \mathbf{P} = -\frac{1}{\Omega}
-   \frac{\partial E}{\partial \boldsymbol{\mathcal{E}}},
-   \qquad
-   Z^{*}_{\kappa,\alpha\beta} =
-   \frac{\partial P_{\alpha}}{\partial R_{\kappa,\beta}},
-   \qquad
-   \chi_{\alpha\beta} =
-   \frac{\partial P_{\alpha}}{\partial \mathcal{E}_{\beta}}.
-
-The volume factor :math:`\Omega` applies to periodic polarization. MACE-Field
-uses the repository's documented output units and tensor conventions; see
-:doc:`user_guide/data` before preparing reference labels.
-
-Source and releases
--------------------
-
-* `MACE-Field source on GitHub <https://github.com/mdi-group/mace-field>`_
-* `Released checkpoints and scripts
-  <https://github.com/mdi-group/mace-field/releases>`_
-* `MACE documentation <https://mace-docs.readthedocs.io/>`_
-
-
-Package documentation
----------------------
-
-The package guide covers the current installation, training, data, and
-calculator interfaces. The examples section links to the Colab-ready tutorial
-notebooks.
-
-.. toctree::
-   :maxdepth: 2
-   :caption: Package Guide
-
-   package-overview
-   quick-start
    guide/index
    examples/index
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Project
+
    references
    development
+
+Source, releases, and the tutorials are available from the
+`MACE-Field GitHub repository <https://github.com/mdi-group/mace-field>`_.

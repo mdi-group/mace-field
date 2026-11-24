@@ -13,8 +13,8 @@ keys, with additional keys for field responses. The defaults are:
 | Electric field | `REF_electric_field` | `Atoms.info` | `(3,)` | V/Å |
 | Polarization | `REF_polarization` | `Atoms.info` | `(3,)` | e/Å² |
 | Born effective charges | `REF_becs` | `Atoms.arrays` | `(N, 3, 3)` or `(N, 9)` | e |
-| Electric susceptibility (`polarizability` API) | `REF_polarizability` | `Atoms.info` | `(3, 3)` or `(9,)` | dimensionless |
-| Hessian | `REF_hessian` | `Atoms.info` | flattened `(3N, 3N)` | eV/Å² |
+| Relative electric susceptibility (`polarizability` API) | `REF_polarizability` | `Atoms.info` | `(3, 3)` or `(9,)` | dimensionless (`ε₀` units) |
+| Energy Hessian | `REF_hessian` | `Atoms.info` | `(3N, 3N)` matrix; flattened in extended XYZ | eV/Å² |
 | Head | `head` | `Atoms.info` | string | — |
 
 Key names can be changed with the corresponding `*_key` training options, for
@@ -37,8 +37,8 @@ mark which labels are present.
 
 The optional Hessian target is the energy Hessian, equivalently the negative
 position derivative of forces. Its default key is `REF_hessian`; its units are
-eV/Å². For an `N`-atom structure, provide a `(3N, 3N)` matrix flattened into
-`Atoms.info` for extended XYZ:
+eV/Å². For an `N`-atom structure, provide a `(3N, 3N)` matrix. When writing
+extended XYZ, flatten it into `Atoms.info`:
 
 ```python
 atoms.info["REF_hessian"] = reference_hessian.reshape(-1)
@@ -52,7 +52,11 @@ for a full CLI example.
 
 ## HDF5 data
 
-The MACE data preparation and HDF5 interfaces preserve electric fields,
-response tensors, per-property weights, and Hessians. See the MACE guide for
+Both supported MACE HDF5 schemas preserve electric fields, response tensors,
+per-property weights, and Hessians. This includes the grouped files written by
+`mace_prepare_data` and the flat `AtomicData` files written by
+`save_dataset_as_HDF5`. The reader restores Hessians and their weights for
+training, including batches containing structures with different atom counts.
+See the MACE guide for
 [large-dataset preprocessing](https://mace-docs.readthedocs.io/en/latest/guide/multipreprocessing.html)
 and use the MACE-Field keys shown above when preparing field-labelled data.

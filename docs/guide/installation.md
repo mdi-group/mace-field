@@ -2,13 +2,8 @@
 
 Install PyTorch for your hardware first, following the
 [PyTorch installation selector](https://pytorch.org/get-started/locally/).
-After the first PyPI release, install MACE-Field with:
-
-```bash
-python -m pip install mace-field-torch
-```
-
-For the current development version, install the repository in editable mode:
+The package release is pending. For now, install MACE-Field from a source
+checkout in editable mode:
 
 ```bash
 git clone https://github.com/mdi-group/mace-field.git
@@ -25,9 +20,8 @@ python -m pip install -e '.[dev]'
 pre-commit install
 ```
 
-The `mace-field-torch` distribution uses the existing Python import name
-`mace`. Do not install it in the same environment as `mace-torch`, since both
-distributions provide that package.
+This checkout provides the `mace` Python import namespace. Avoid installing it
+in the same environment as another distribution that also provides `mace`.
 
 General MACE requirements, CUDA setup, and optional accelerator backends are
 covered in the [MACE installation guide](https://mace-docs.readthedocs.io/en/latest/guide/installation.html)

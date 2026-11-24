@@ -13,12 +13,11 @@ response properties from derivatives of that same scalar:
 - Polarization is obtained from the field derivative,
   $\mathbf{P} = -\Omega^{-1}\,\partial E/\partial\boldsymbol{\mathcal{E}}$,
   where $\Omega$ is the cell volume for periodic configurations.
-- Born effective charges describe the position derivative of polarization,
-  $Z^*_{\kappa,\alpha\beta}=\Omega\,\partial P_\alpha/\partial R_{\kappa,\beta}$.
-- The dimensionless electric susceptibility is obtained from a further field
-  derivative, $\chi_{\alpha\beta}=\epsilon_0^{-1}\partial P_\alpha/\partial\mathcal{E}_\beta$.
-  The Python output and label
-  key retain the name `polarizability`.
+- Born effective charges are the volume-scaled position derivative of
+  polarization, $Z^*_{\kappa,\alpha\beta}=\Omega\,\partial P_\alpha/\partial R_{\kappa,\beta}$.
+- The `polarizability` output is the relative electric susceptibility,
+  $\chi_{\alpha\beta}=\epsilon_0^{-1}\partial P_\alpha/\partial\mathcal{E}_\beta$.
+  It is dimensionless and is reported in $\epsilon_0$ units.
 
 This shared energy makes the energy, forces, and field responses consistent
 with one another. At zero field, the field coupling contributes zero, which

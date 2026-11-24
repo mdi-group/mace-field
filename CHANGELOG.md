@@ -5,11 +5,10 @@ MACE core are maintained by the [upstream MACE project](https://github.com/ACEsu
 
 ## 1.1.0 — unreleased
 
-- Publish the MACE-Field extension as the distinct `mace-field-torch`
-  distribution while retaining the `mace` import namespace.
+- Add release automation and retain the `mace` Python import namespace.
 - Add HDF5 support for Hessian-labelled training data and improve field-response
   training, validation, and loss handling.
-- Add a version-checked PyPI release workflow, contributor guidance, and release documentation.
+- Add contributor guidance and release documentation.
 
 ## Previous releases
 

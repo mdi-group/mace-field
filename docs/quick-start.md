@@ -8,13 +8,8 @@ labels.
 ## Install
 
 Install a PyTorch build that matches your CPU or CUDA environment. After the
-first PyPI release, install MACE-Field with:
-
-```bash
-python -m pip install mace-field-torch
-```
-
-To use the current development version, install this checkout:
+package release is available, installation instructions will be updated here.
+For now, install the source checkout in editable mode:
 
 ```bash
 git clone https://github.com/mdi-group/mace-field.git
@@ -78,3 +73,34 @@ polarization = atoms.calc.results["polarization"]
 
 Continue with the [ASE calculator guide](guide/ase-calculator.md), or use the
 [tutorial notebooks](examples/index.md) for a worked BaTiO₃ workflow.
+
+## Try the released MH-0 checkpoint
+
+The [1.0.2 release](https://github.com/mdi-group/mace-field/releases/tag/1.0.2)
+includes the multi-head checkpoint
+[`MACEField-MH-0-omat-dielectric.model`](https://github.com/mdi-group/mace-field/releases/download/1.0.2/MACEField-MH-0-omat-dielectric.model).
+Download it and select the head that matches your data domain:
+
+```python
+from ase.build import bulk
+from mace.calculators import MACECalculator
+
+atoms = bulk("Si", "diamond", a=5.43)
+atoms.calc = MACECalculator(
+    model_paths=["MACEField-MH-0-omat-dielectric.model"],
+    model_type="MACEField",
+    head="mp-dielectric",
+    electric_field=(0.0, 0.0, 0.01),  # V/Å
+    compute_polarization=True,
+    compute_becs=True,
+    compute_polarizability=True,
+    device="cpu",
+)
+
+energy = atoms.get_potential_energy()
+forces = atoms.get_forces()
+polarization = atoms.calc.results["polarization"]
+```
+
+See the [ASE calculator guide](guide/ase-calculator.md) for field selection
+and additional outputs.
