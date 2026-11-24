@@ -10,7 +10,7 @@ the separate [MACE-Field tutorials repository](https://github.com/mdi-group/mace
 3. [Finite-field ASE molecular dynamics](https://github.com/mdi-group/mace-field-tutorial/blob/main/tutorials/macefield/03_finite_field_mlmd_hysteresis.ipynb) — [Open in Colab](https://colab.research.google.com/github/mdi-group/mace-field-tutorial/blob/main/tutorials/macefield/03_finite_field_mlmd_hysteresis.ipynb).
 4. [Explore the existing dielectric and ferroelectric datasets](https://github.com/mdi-group/mace-field-tutorial/blob/main/tutorials/macefield/04_response_datasets.ipynb) — [Open in Colab](https://colab.research.google.com/github/mdi-group/mace-field-tutorial/blob/main/tutorials/macefield/04_response_datasets.ipynb).
 
-The course notebook setup clones this package's `clean` branch and installs it
+The course notebook setup clones this package's `main` branch and installs it
 in editable mode. The BaTiO₃ reference set contains 59 135-atom structures and
 a 48/11 train/validation split at one small positive field vector. The
 finite-field trajectory is a software workflow demonstration, not a validated
