@@ -7,6 +7,7 @@
 [![Core tests](https://github.com/mdi-group/mace-field/actions/workflows/ci-core.yaml/badge.svg?branch=main)](https://github.com/mdi-group/mace-field/actions/workflows/ci-core.yaml)
 [![Extension tests](https://github.com/mdi-group/mace-field/actions/workflows/ci-extensions.yaml/badge.svg?branch=main)](https://github.com/mdi-group/mace-field/actions/workflows/ci-extensions.yaml)
 [![Integration tests](https://github.com/mdi-group/mace-field/actions/workflows/ci-integrations.yaml/badge.svg?branch=main)](https://github.com/mdi-group/mace-field/actions/workflows/ci-integrations.yaml)
+[![Documentation Status](https://app.readthedocs.org/projects/mace-field/badge/?version=latest)](https://mace-field.readthedocs.io/en/latest/?badge=latest)
 [![Latest release](https://img.shields.io/github/v/release/mdi-group/mace-field)](https://github.com/mdi-group/mace-field/releases)
 
 MACE-Field extends the [MACE](https://github.com/ACEsuit/mace) architecture with a
@@ -64,7 +65,7 @@ python -m pip install -e .
 The generic MACE installation, training, CUDA, and foundation-model guides are
 available in the [MACE documentation](https://mace-docs.readthedocs.io/).
 For MACE-Field-specific installation, data, training, and inference guidance,
-see the [MACE-Field documentation](docs/index.rst).
+see the [MACE-Field documentation](https://mace-field.readthedocs.io/en/latest/).
 
 Build the documentation site locally with:
 
